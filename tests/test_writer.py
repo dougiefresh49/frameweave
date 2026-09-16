@@ -468,7 +468,7 @@ def test_segment_ids_assigned_when_missing(tmp_path: Path) -> None:
     assert [s.id for s in segments] == ["s0001", "s0099", "s0003"]
 
 
-_QUOTED_STRING = re.compile(r'"(?:\\.|[^"\\])*"')
+_QUOTED_STRING = re.compile(r'"(?:\\["\\]|[^"\\])*"')
 
 
 def _unescape_fwv_string(body: str) -> str:
@@ -495,7 +495,7 @@ def test_quoted_string_escapes_round_trip(tmp_path: Path) -> None:
     """Issue #41: ``"`` → ``\\"``, ``\\`` → ``\\\\``; reader honors both."""
     resolved = Resolved(video_id="v", title="t", channel="c", source="/v.mp4", duration=10.0)
     frames = [Frame("f0001", 0.0, "primary", "frames/f0001-00-00-00.0.jpg")]
-    originals = ['say "hi"', r"path\to", r'say "hi" and \escape']
+    originals = ['say "hi"', r"path\to", r'say "hi" and \escape', r'a\"b', 'trail\\']
     descriptions = [
         Description("f0001", "claude:sonnet", "Has quotes and backslashes.", originals),
     ]
