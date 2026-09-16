@@ -99,6 +99,9 @@ class Config:
     channels: dict[str, str]
     captions_mode: str  # auto | manual | none (issue #8)
     vision_effort: str  # codex reasoning effort for frames: low | medium (issue #11)
+    # None → chooser module defaults (AgentUsageBar path / fleet refresh script).
+    usage_snapshot: Path | None
+    usage_refresh_script: Path | None
 
 
 _KINDS: dict[str, str] = {
@@ -124,6 +127,8 @@ _KINDS: dict[str, str] = {
     "channels": "channels",
     "captions_mode": "str",
     "vision_effort": "str",
+    "usage_snapshot": "opt_path",
+    "usage_refresh_script": "opt_path",
 }
 
 
@@ -151,6 +156,8 @@ def _defaults() -> dict[str, object]:
         "channels": {},
         "captions_mode": "auto",
         "vision_effort": "low",
+        "usage_snapshot": None,
+        "usage_refresh_script": None,
     }
 
 

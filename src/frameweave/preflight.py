@@ -33,6 +33,7 @@ MODULES: list[str] = [
     "frameweave.stt.speakers",
     "frameweave.frames",
     "frameweave.vision.base",
+    "frameweave.vision.choose",
     "frameweave.format.readme",
 ]
 

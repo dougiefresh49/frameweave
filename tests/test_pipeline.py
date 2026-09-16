@@ -622,3 +622,50 @@ def test_two_chapter_runs_reuse_fetch_distinct_keys(tmp_path: Path) -> None:
     assert "## [00:00:08] Middle" not in first_text
     assert "## [00:00:08] Middle" in second_text
     assert "## [00:00:00] Intro" not in second_text
+
+
+def test_auto_run_writes_lane_choice_and_lane_actual(tmp_path: Path) -> None:
+    """Pipeline wiring: auto → meta.lane_choice and cost.lane_actual (issue #26 fix)."""
+    from datetime import UTC, datetime
+
+    snap_path = tmp_path / "usage-snapshot.json"
+    snap_path.write_text(
+        json.dumps(
+            {
+                "generatedAt": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "providers": {
+                    "claude": {
+                        "metrics": [
+                            {"id": "five_hour", "percentUsed": 10},
+                            {"id": "seven_day", "percentUsed": 20},
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    video = _video(tmp_path)
+    cfg = _cfg(
+        tmp_path,
+        vision_lane="auto",
+        usage_snapshot=snap_path,
+        usage_refresh_script=tmp_path / "missing-refresh.sh",
+    )
+    outcome = run(
+        str(video),
+        cfg,
+        source=FakeSource(video=video),
+        stt=FakeStt(),
+        vision=FakeVision(),
+    )
+    assert outcome.vision_lane == "claude"
+    meta = json.loads((outcome.output_path / "meta.json").read_text(encoding="utf-8"))
+    assert "lane_choice" in meta
+    assert meta["lane_choice"]["lane"] == "claude"
+    cost = json.loads((outcome.output_path / "cost.json").read_text(encoding="utf-8"))
+    assert "lane_actual" in cost
+    assert cost["lane_actual"]["lane"] == "claude"
+    assert "tokens_per_frame" in cost["lane_actual"]
+    # Chooser before-reading is present, so quota_delta is populated (not {}).
+    assert "five_hour" in cost["lane_actual"]["quota_delta"]

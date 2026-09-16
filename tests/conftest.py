@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -24,3 +25,21 @@ def fixed_rand() -> Callable[[], float]:
         return 0.5
 
     return rand
+
+
+@pytest.fixture(autouse=True)
+def _isolate_usage_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point chooser usage paths at the test tmp dir so nothing hits the real home.
+
+    Covers Config fields (None → module defaults) and direct load_snapshot calls.
+    """
+    snap = tmp_path / "usage-snapshot.json"
+    script = tmp_path / "get-usage.sh"
+    monkeypatch.setattr(
+        "frameweave.vision.choose.DEFAULT_SNAPSHOT_PATH",
+        snap,
+    )
+    monkeypatch.setattr(
+        "frameweave.vision.choose.DEFAULT_REFRESH_SCRIPT",
+        script,
+    )

@@ -1,0 +1,44 @@
+{
+  "generatedAt": "2026-09-16T18:00:00Z",
+  "providers": {
+    "claude": {
+      "metrics": [
+        {
+          "id": "five_hour",
+          "percentUsed": 8,
+          "resetsAt": "2026-09-16T23:00:00Z"
+        },
+        {
+          "id": "seven_day",
+          "percentUsed": 12,
+          "resetsAt": "2026-09-23T08:00:00Z"
+        },
+        {
+          "id": "seven_day_sonnet",
+          "percentUsed": 11,
+          "resetsAt": "2026-09-23T08:00:00Z"
+        },
+        {
+          "id": "limit.weekly_scoped:Fable:2026-09-23T08:00:00.095338+00:00",
+          "label": "Fable (7 day)",
+          "percentUsed": 95,
+          "resetsAt": "2026-09-23T08:00:00Z"
+        }
+      ]
+    },
+    "openai": {
+      "metrics": [
+        {
+          "id": "primary",
+          "percentUsed": 1,
+          "resetsAt": "2026-09-16T23:00:00Z"
+        },
+        {
+          "id": "secondary",
+          "percentUsed": 2,
+          "resetsAt": "2026-09-23T08:00:00Z"
+        }
+      ]
+    }
+  }
+}
