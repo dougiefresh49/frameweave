@@ -1,0 +1,520 @@
+"""Pipeline registry: reuse, redo, frames-only, ledger timing, cleanup."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import textwrap
+import types
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from frameweave.config import ConfigError, load
+from frameweave.ledger import DELETERS, reconcile
+from frameweave.pipeline import (
+    STAGES,
+    cli_flags,
+    preflight_checks,
+    run,
+)
+from frameweave.types import Resolved, Segment
+from tests.fakes.pipeline import FakeSource, FakeStt, FakeVision
+from tests.make_synthetic import make as make_synthetic
+
+MISSING_TOML = Path("/nonexistent/frameweave-test/config.toml")
+
+
+def _cfg(tmp_path: Path, **flags: object):
+    out = tmp_path / "out"
+    cache = tmp_path / "cache"
+    out.mkdir(exist_ok=True)
+    cache.mkdir(exist_ok=True)
+    base = {
+        "out": out,
+        "cache_dir": cache,
+        "vision_lane": "claude",
+        "frames_per_call": 2,
+        "frame_interval_s": 5.0,
+        "captions_mode": "none",
+    }
+    base.update(flags)
+    return load(flags=base, env={}, toml_path=MISSING_TOML, dotenv_paths=[])
+
+
+def _video(tmp_path: Path) -> Path:
+    path = tmp_path / "clip.mp4"
+    make_synthetic(path, 20)
+    return path
+
+
+def test_cli_flags_and_preflight(tmp_path: Path) -> None:
+    names = {flag.name for flag in cli_flags()}
+    assert "--redo" in names
+    assert "--frames-only" in names
+    checks = preflight_checks(_cfg(tmp_path))
+    assert checks and checks[0].ok
+
+
+def test_full_run_and_identical_rerun(tmp_path: Path) -> None:
+    """Second run: zero STT/vision/fetch calls. Resolve runs every time by design."""
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path)
+    source = FakeSource(video=video)
+    stt = FakeStt()
+    vision = FakeVision()
+    lines: list[str] = []
+
+    outcome = run(
+        str(video),
+        cfg,
+        progress=lines.append,
+        source=source,
+        stt=stt,
+        vision=vision,
+    )
+    out = outcome.output_path
+    assert out.is_dir()
+    for name in ("transcript.fwv", "meta.json", "cost.json", "README.md"):
+        assert (out / name).is_file(), name
+    assert (out / "frames").is_dir()
+    assert any((out / "frames").glob("*.jpg"))
+    assert list((cfg.cache_dir / "runs").rglob("ledger.jsonl"))
+
+    stt_calls = stt.calls
+    vision_calls = vision.calls
+    fetch_calls = source.fetch_calls
+    resolve_calls = source.resolve_calls
+    assert stt_calls >= 1
+    assert vision_calls >= 1
+    assert any(line.startswith("stage ") for line in lines)
+
+    outcome2 = run(
+        str(video),
+        cfg,
+        source=source,
+        stt=stt,
+        vision=vision,
+    )
+    assert outcome2.output_path == out
+    assert stt.calls == stt_calls
+    assert vision.calls == vision_calls
+    assert source.fetch_calls == fetch_calls
+    # resolve is called every run by design (picks video_id / run key path)
+    assert source.resolve_calls > resolve_calls
+
+
+def test_frame_interval_reruns_frames_describe_assemble(tmp_path: Path) -> None:
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path, frame_interval_s=5.0)
+    source = FakeSource(video=video)
+    stt = FakeStt()
+    vision = FakeVision()
+    run(str(video), cfg, source=source, stt=stt, vision=vision)
+    stt_after = stt.calls
+    vision_after = vision.calls
+
+    cfg2 = load(
+        flags={
+            "out": cfg.out,
+            "cache_dir": cfg.cache_dir,
+            "vision_lane": "claude",
+            "frames_per_call": 2,
+            "frame_interval_s": 3.0,
+            "captions_mode": "none",
+        },
+        env={},
+        toml_path=MISSING_TOML,
+        dotenv_paths=[],
+    )
+    run(str(video), cfg2, source=source, stt=stt, vision=vision)
+    assert stt.calls == stt_after
+    assert vision.calls > vision_after
+
+
+def test_stt_model_change_reruns_transcript(tmp_path: Path) -> None:
+    """Only stt_model changes → sibling transcript must not be reused; STT runs again."""
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path, stt_model="large-v3-turbo")
+    source = FakeSource(video=video)
+    stt = FakeStt()
+    vision = FakeVision()
+    run(str(video), cfg, source=source, stt=stt, vision=vision)
+    stt_after = stt.calls
+
+    cfg2 = load(
+        flags={
+            "out": cfg.out,
+            "cache_dir": cfg.cache_dir,
+            "vision_lane": "claude",
+            "frames_per_call": 2,
+            "frame_interval_s": 5.0,
+            "captions_mode": "none",
+            "stt_model": "large-v3",
+        },
+        env={},
+        toml_path=MISSING_TOML,
+        dotenv_paths=[],
+    )
+    run(str(video), cfg2, source=source, stt=stt, vision=vision)
+    assert stt.calls > stt_after
+
+
+def test_redo_describe(tmp_path: Path) -> None:
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path)
+    source = FakeSource(video=video)
+    stt = FakeStt()
+    vision = FakeVision()
+    run(str(video), cfg, source=source, stt=stt, vision=vision)
+    stt_n = stt.calls
+    vision_n = vision.calls
+    run(str(video), cfg, redo=("describe",), source=source, stt=stt, vision=vision)
+    assert stt.calls == stt_n
+    assert vision.calls > vision_n
+
+
+def test_redo_describe_does_not_double_count_dollars(tmp_path: Path) -> None:
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path)
+    source = FakeSource(video=video)
+    stt = FakeStt()
+    vision = FakeVision(usd_per_call=0.01)
+    first = run(str(video), cfg, source=source, stt=stt, vision=vision)
+    vision_before_redo = vision.calls
+    second = run(
+        str(video), cfg, redo=("describe",), source=source, stt=stt, vision=vision
+    )
+    describe_lines = 0
+    for path in (cfg.cache_dir / "runs").rglob("ledger.jsonl"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            if json.loads(line).get("stage") == "describe":
+                describe_lines += 1
+    assert describe_lines == vision.calls - vision_before_redo
+    assert second.cost_usd == pytest.approx(first.cost_usd)
+
+
+def test_frames_only(tmp_path: Path) -> None:
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path)
+    source = FakeSource(video=video)
+    stt = FakeStt()
+    vision = FakeVision()
+    outcome = run(
+        str(video),
+        cfg,
+        frames_only=True,
+        source=source,
+        stt=stt,
+        vision=vision,
+    )
+    assert stt.calls == 0
+    assert vision.calls == 0
+    assert outcome.completion == "complete (speech not requested)"
+    assert (outcome.output_path / "transcript.fwv").is_file()
+    assert (outcome.output_path / "frames").is_dir()
+
+
+def test_vision_context_window(tmp_path: Path) -> None:
+    """frames_per_call=1: second batch gets the second segment, not the first."""
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path, frames_per_call=1, frame_interval_s=5.0)
+    source = FakeSource(video=video)
+    stt = FakeStt(
+        segments=[
+            Segment(0.0, 4.0, "alpha window text", "stt-fake", id="s0001"),
+            Segment(8.0, 12.0, "beta window text", "stt-fake", id="s0002"),
+        ]
+    )
+    vision = FakeVision()
+    run(str(video), cfg, source=source, stt=stt, vision=vision)
+    assert len(vision.contexts) >= 2
+    second = vision.contexts[1]
+    assert "beta window text" in second
+    assert "alpha window text" not in second
+
+
+def test_injected_stt_still_extracts_and_chunks(tmp_path: Path) -> None:
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path)
+    source = FakeSource(video=video)
+    stt = FakeStt()
+    vision = FakeVision()
+    run(str(video), cfg, source=source, stt=stt, vision=vision)
+    assert stt.paths
+    assert all(path.suffix == ".wav" for path in stt.paths)
+    run_dirs = list((cfg.cache_dir / "runs").rglob("transcript.json"))
+    assert run_dirs
+    run_dir = run_dirs[0].parent
+    assert (run_dir / "audio.wav").is_file() or list((run_dir / "chunks").glob("*.wav"))
+
+
+def test_http_duration_refreshed_after_fetch(tmp_path: Path) -> None:
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path)
+
+    class HttpishSource(FakeSource):
+        def resolve(self, raw_input: str) -> Resolved:
+            resolved = super().resolve(raw_input)
+            return replace(resolved, duration=0.0)
+
+        def resolved_after_fetch(self, dest_dir: Path) -> Resolved:
+            del dest_dir
+            assert self.video is not None
+            return Resolved(
+                video_id=self._video_id,
+                title="Synthetic twenty",
+                channel="Test Channel",
+                source=str(self.video.resolve()),
+                duration=20.0,
+                has_captions=False,
+            )
+
+    source = HttpishSource(video=video)
+    stt = FakeStt()
+    vision = FakeVision()
+    run(str(video), cfg, source=source, stt=stt, vision=vision)
+    resolved_path = next((cfg.cache_dir / "sources").rglob("resolved.json"))
+    data = json.loads(resolved_path.read_text(encoding="utf-8"))
+    assert data["duration"] == 20.0
+    frames_path = next((cfg.cache_dir / "runs").rglob("frames.json"))
+    frames = json.loads(frames_path.read_text(encoding="utf-8"))["frames"]
+    assert frames, "duration 0 would plan zero frames"
+
+
+def test_command_line_uses_redacted_source(tmp_path: Path) -> None:
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path)
+    secret = "https://cdn.example/vid.mp4?token=super-secret"
+    redacted = "https://cdn.example/vid.mp4?token=***"
+
+    class RedactingSource(FakeSource):
+        def resolve(self, raw_input: str) -> Resolved:
+            del raw_input
+            resolved = super().resolve(str(video))
+            return replace(resolved, source=redacted)
+
+        def fetch_media(self, resolved: Resolved, dest_dir: Path):
+            assert self.video is not None
+            return super().fetch_media(
+                replace(resolved, source=str(self.video.resolve())),
+                dest_dir,
+            )
+
+    source = RedactingSource(video=video)
+    outcome = run(
+        secret,
+        cfg,
+        source=source,
+        stt=FakeStt(),
+        vision=FakeVision(),
+    )
+    meta = json.loads((outcome.output_path / "meta.json").read_text(encoding="utf-8"))
+    assert "super-secret" not in meta["command_line"]
+    assert redacted in meta["command_line"]
+
+
+def test_assemble_not_reused_when_output_missing(tmp_path: Path) -> None:
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path)
+    source = FakeSource(video=video)
+    stt = FakeStt()
+    vision = FakeVision()
+    first = run(str(video), cfg, source=source, stt=stt, vision=vision)
+    import shutil
+
+    shutil.rmtree(first.output_path)
+    second = run(str(video), cfg, source=source, stt=stt, vision=vision)
+    assert second.output_path.is_dir()
+    assert (second.output_path / "transcript.fwv").is_file()
+
+
+def test_require_out_before_stage_1(tmp_path: Path) -> None:
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path)
+    cfg = replace(cfg, out=None)
+    source = FakeSource(video=video)
+    vision = FakeVision()
+    with pytest.raises(ConfigError, match="FRAMEWEAVE_OUT"):
+        run(str(video), cfg, source=source, stt=FakeStt(), vision=vision)
+    assert vision.calls == 0
+
+
+def test_speakers_unavailable_before_stage_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path, speakers=True)
+
+    class SpeakersUnavailable(RuntimeError):
+        pass
+
+    def make_diarizer(_config: object) -> None:
+        raise SpeakersUnavailable("HF_TOKEN missing")
+
+    fake = types.ModuleType("frameweave.stt.speakers")
+    fake.SpeakersUnavailable = SpeakersUnavailable  # type: ignore[attr-defined]
+    fake.make_diarizer = make_diarizer  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "frameweave.stt.speakers", fake)
+
+    source = FakeSource(video=video)
+    vision = FakeVision()
+    with pytest.raises(SpeakersUnavailable):
+        run(str(video), cfg, source=source, vision=vision)
+    assert vision.calls == 0
+    assert source.fetch_calls == 0
+
+
+def test_ledger_persists_before_descriptions_on_failure(tmp_path: Path) -> None:
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path, frames_per_call=1, frame_interval_s=2.0)
+    source = FakeSource(video=video)
+    stt = FakeStt()
+    vision = FakeVision(fail_after=1)
+    with pytest.raises(RuntimeError, match="fake vision failed"):
+        run(str(video), cfg, source=source, stt=stt, vision=vision)
+    run_dirs = list((cfg.cache_dir / "runs").rglob("ledger.jsonl"))
+    assert run_dirs
+    ledger_path = run_dirs[0]
+    run_dir = ledger_path.parent
+    assert ledger_path.is_file()
+    assert ledger_path.stat().st_size > 0
+    assert not (run_dir / "descriptions.json").is_file()
+
+
+def test_sigkill_leaves_obligations_for_reconcile(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "vid" / "rk"
+    run_dir.mkdir(parents=True)
+    code = textwrap.dedent(
+        f"""
+        import os, signal, sys
+        from pathlib import Path
+        sys.path.insert(0, {str(Path.cwd() / "src")!r})
+        from frameweave.ledger import Ledger
+        led = Ledger(Path({str(run_dir)!r}))
+        led.register("fake", "kill-1")
+        led.register("fake", "kill-2")
+        os.kill(os.getpid(), signal.SIGKILL)
+        """
+    )
+    proc = subprocess.run([sys.executable, "-c", code], check=False)
+    assert proc.returncode != 0
+    obligations = json.loads((run_dir / "obligations.json").read_text())
+    assert {item["id"] for item in obligations} == {"kill-1", "kill-2"}
+
+    deleted: list[str] = []
+    DELETERS["fake"] = deleted.append
+    try:
+        assert reconcile(tmp_path) == 2
+        assert sorted(deleted) == ["kill-1", "kill-2"]
+    finally:
+        DELETERS.pop("fake", None)
+
+
+def test_sigint_subprocess_reconciles_and_clears_temps(tmp_path: Path) -> None:
+    """Real SIGINT to a subprocess that installed the pipeline handlers."""
+    import signal
+    import time
+
+    run_dir = tmp_path / "runs" / "vid" / "rk"
+    source_dir = tmp_path / "sources" / "vid"
+    out_dir = tmp_path / "out"
+    run_dir.mkdir(parents=True)
+    source_dir.mkdir(parents=True)
+    out_dir.mkdir(parents=True)
+    ready = tmp_path / "ready"
+    code = textwrap.dedent(
+        f"""
+        import os, signal, sys, time
+        from pathlib import Path
+        sys.path.insert(0, {str(Path.cwd() / "src")!r})
+        from frameweave.config import load
+        from frameweave.ledger import DELETERS, Ledger
+        from frameweave.pipeline import RunContext, _install_handlers
+        from frameweave.types import Resolved
+
+        run_dir = Path({str(run_dir)!r})
+        source_dir = Path({str(source_dir)!r})
+        (run_dir / "frame.tmp.jpg").write_bytes(b"x")
+        (run_dir / "media.partial").write_bytes(b"y")
+        (run_dir / ".assembled.json.1.tmp").write_bytes(b"z")
+        led = Ledger(run_dir)
+        led.register("fake", "int-1")
+
+        def _delete(uid: str) -> None:
+            (run_dir / f"deleted-{{uid}}").write_text("ok", encoding="utf-8")
+
+        DELETERS["fake"] = _delete
+        cfg = load(
+            flags={{
+                "out": Path({str(out_dir)!r}),
+                "cache_dir": Path({str(tmp_path)!r}),
+                "vision_lane": "claude",
+            }},
+            env={{}},
+            toml_path=Path("/nonexistent/frameweave-test/config.toml"),
+            dotenv_paths=[],
+        )
+        ctx = RunContext(
+            config=cfg,
+            raw_input="x",
+            source=object(),
+            resolved=Resolved(
+                video_id="vid",
+                title="t",
+                channel="c",
+                source="x",
+                duration=1.0,
+            ),
+            source_dir=source_dir,
+            run_dir=run_dir,
+            run_key="rk",
+            range_spec="full",
+            ledger=led,
+            progress=lambda _m: None,
+            redo=set(),
+        )
+        _install_handlers(ctx)
+        Path({str(ready)!r}).write_text("1", encoding="utf-8")
+        while True:
+            time.sleep(0.05)
+        """
+    )
+    proc = subprocess.Popen([sys.executable, "-c", code])
+    try:
+        for _ in range(200):
+            if ready.is_file():
+                break
+            if proc.poll() is not None:
+                raise AssertionError(f"subprocess exited early: {proc.returncode}")
+            time.sleep(0.05)
+        else:
+            proc.kill()
+            raise AssertionError("subprocess never became ready")
+        proc.send_signal(signal.SIGINT)
+        proc.wait(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    assert not (run_dir / "frame.tmp.jpg").exists()
+    assert not (run_dir / "media.partial").exists()
+    assert not (run_dir / ".assembled.json.1.tmp").exists()
+    assert (run_dir / "deleted-int-1").is_file()
+
+
+def test_stage_registry_order() -> None:
+    assert [s.name for s in STAGES] == [
+        "resolve",
+        "fetch_media",
+        "fetch_captions",
+        "transcript",
+        "frames",
+        "describe",
+        "assemble",
+    ]
