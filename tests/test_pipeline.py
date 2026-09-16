@@ -1023,3 +1023,52 @@ def test_direct_url_captions_are_note_not_warning(tmp_path: Path) -> None:
     meta = json.loads((outcome.output_path / "meta.json").read_text(encoding="utf-8"))
     assert meta["stats"]["captions"] == "not applicable (direct URL)"
     assert meta["warnings"] == []
+
+
+def test_explicit_gemini_without_key_fails_before_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #66: an unavailable explicit lane raises before stage 1 downloads anything."""
+    from frameweave.vision.choose import NoVisionLane
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path, vision_lane="gemini")
+    source = FakeSource(video=video)
+    with pytest.raises(NoVisionLane) as excinfo:
+        run(
+            str(video),
+            cfg,
+            source=source,
+            stt=FakeStt(),
+            vision=FakeVision(),
+        )
+    assert "GEMINI_API_KEY not set" in str(excinfo.value)
+    assert source.fetch_calls == 0  # nothing downloaded
+
+
+def test_auto_raises_before_fetch_when_no_lane_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #66: auto with every candidate unavailable fails before stage 1."""
+    from frameweave.vision.choose import NoVisionLane
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    video = _video(tmp_path)
+    cfg = _cfg(
+        tmp_path,
+        vision_lane="auto",
+        usage_snapshot=tmp_path / "missing-snapshot.json",
+        usage_refresh_script=tmp_path / "missing-refresh.sh",
+    )
+    source = FakeSource(video=video)
+    with pytest.raises(NoVisionLane):
+        run(
+            str(video),
+            cfg,
+            source=source,
+            stt=FakeStt(),
+            vision=FakeVision(),
+        )
+    assert source.fetch_calls == 0

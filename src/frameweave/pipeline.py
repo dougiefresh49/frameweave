@@ -515,14 +515,19 @@ def _with_resolved_lane(
     frames: int | None = None,
     transcript_minutes: float | None = None,
 ) -> tuple[Config, dict[str, Any] | None, Any]:
-    """Resolve ``auto`` via the usage-aware chooser.
+    """Resolve ``auto``, and validate any checkable lane, via the usage-aware chooser.
 
+    A lane is "checkable" when it needs a key or CLI (claude, codex, gemini);
+    ``none`` needs neither. Called before stage 1 so a missing key or CLI (issue
+    #66) raises ``NoVisionLane`` before anything is downloaded or transcribed.
     Returns ``(config, lane_choice dict, snapshot used for the choice)``.
     """
-    if config.vision_lane != "auto":
+    if config.vision_lane == "none":
         return config, None, None
     if resolved is None:
-        return replace(config, vision_lane="claude"), None, None
+        if config.vision_lane == "auto":
+            return replace(config, vision_lane="claude"), None, None
+        return config, None, None
 
     if frames is None:
         synthetic = [Segment(0.0, resolved.duration, "", "none")]
@@ -544,7 +549,8 @@ def _with_resolved_lane(
         transcript_minutes=minutes,
         frames_per_call=max(1, int(config.frames_per_call)),
     )
-    choice = choose(plan, snapshot, get_coefficients(), config, explicit_lane=None)
+    explicit = None if config.vision_lane == "auto" else config.vision_lane
+    choice = choose(plan, snapshot, get_coefficients(), config, explicit_lane=explicit)
     return replace(config, vision_lane=choice.lane), choice_to_dict(choice), snapshot
 
 
