@@ -6,7 +6,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 if [ -z "${FRAMEWEAVE_SCRUB_TERMS:-}" ] && [ -f "$ROOT/.env" ]; then
-  FRAMEWEAVE_SCRUB_TERMS="$(grep -E '^FRAMEWEAVE_SCRUB_TERMS=' "$ROOT/.env" | tail -1 | cut -d= -f2-)"
+  FRAMEWEAVE_SCRUB_TERMS="$( (grep -E '^FRAMEWEAVE_SCRUB_TERMS=' "$ROOT/.env" || true) | tail -1 | cut -d= -f2-)"
 fi
 LIST="${FRAMEWEAVE_SCRUB_TERMS:-$HOME/.config/frameweave/scrub-terms.txt}"
 LIST="${LIST/#\~/$HOME}"
