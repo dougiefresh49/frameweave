@@ -122,6 +122,11 @@ def main(
     except KeyboardInterrupt as exc:
         print("frameweave: interrupted", file=err)
         return int(getattr(exc, "exit_code", 130))
+    except SystemExit as exc:  # a vision child killed by SIGTERM surfaces as SystemExit(143)
+        if exc.code == 143:
+            print("frameweave: interrupted", file=err)
+            return 143
+        raise
     except Exception as exc:
         return _handle_error(exc, getattr(args, "debug", False), err)
 
