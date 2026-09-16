@@ -42,8 +42,11 @@ def make_tiny_mp4(dest: Path) -> Path:
 class FakeHttpServer:
     url: str
     requests: list[str] = field(default_factory=list)
+    request_headers: list[dict[str, str]] = field(default_factory=list)
     mp4: bytes = b""
     html: bytes = b"<html><body>challenge</body></html>"
+    head_status: int | None = None
+    bodies: dict[str, tuple[bytes, str]] = field(default_factory=dict)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -51,17 +54,25 @@ class _Handler(BaseHTTPRequestHandler):
         return
 
     def do_HEAD(self) -> None:
-        self.server.recorder.requests.append(self.requestline)  # type: ignore[attr-defined]
+        self._record()
         self._send(write_body=False)
 
     def do_GET(self) -> None:
-        self.server.recorder.requests.append(self.requestline)  # type: ignore[attr-defined]
+        self._record()
         self._send(write_body=True)
+
+    def _record(self) -> None:
+        recorder: FakeHttpServer = self.server.recorder  # type: ignore[attr-defined]
+        recorder.requests.append(self.requestline)
+        recorder.request_headers.append({k: v for k, v in self.headers.items()})
 
     def _send(self, *, write_body: bool) -> None:
         recorder: FakeHttpServer = self.server.recorder  # type: ignore[attr-defined]
         path = urlsplit(self.path).path
-        if path == "/video.mp4":
+        if path in recorder.bodies:
+            body, content_type = recorder.bodies[path]
+            status = 200
+        elif path == "/video.mp4":
             body = recorder.mp4
             content_type = "video/mp4"
             status = 200
@@ -73,19 +84,32 @@ class _Handler(BaseHTTPRequestHandler):
             body = b"not found"
             content_type = "text/plain"
             status = 404
+        if not write_body and recorder.head_status is not None:
+            status = recorder.head_status
+            if status >= 400:
+                body = b""
+                content_type = "text/plain"
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        if write_body and status != 404:
-            self.wfile.write(body)
-        elif write_body:
+        if write_body:
             self.wfile.write(body)
 
 
 @contextmanager
-def serve_media(mp4_path: Path) -> Iterator[FakeHttpServer]:
-    recorder = FakeHttpServer(url="", mp4=mp4_path.read_bytes())
+def serve_media(
+    mp4_path: Path,
+    *,
+    head_status: int | None = None,
+    bodies: dict[str, tuple[bytes, str]] | None = None,
+) -> Iterator[FakeHttpServer]:
+    recorder = FakeHttpServer(
+        url="",
+        mp4=mp4_path.read_bytes(),
+        head_status=head_status,
+        bodies=bodies or {},
+    )
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     httpd.recorder = recorder  # type: ignore[attr-defined]
     host, port = httpd.server_address[:2]

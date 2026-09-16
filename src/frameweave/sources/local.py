@@ -10,11 +10,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from frameweave.config import Check, Config
 from frameweave.types import Resolved, Segment
 from frameweave.util.media import sniff
 from frameweave.util.retry import Outcome, RequestFailed, RequestTimeout, RetryExhausted, call
 
-_TIMEOUT_S = 120.0
+_DEFAULT_TIMEOUT_S = 120.0
 _MEDIA_SKIP = {".json", ".partial", ".tmp"}
 _FFPROBE_DURATION = [
     "ffprobe",
@@ -25,23 +26,6 @@ _FFPROBE_DURATION = [
     "-of",
     "csv=p=0",
 ]
-
-
-try:
-    from frameweave.config import Check as Check
-except ModuleNotFoundError:  # issue #4 not in this worktree yet
-
-    from dataclasses import dataclass
-
-    @dataclass(frozen=True)
-    class Check:
-        """Same fields as ``frameweave.config.Check``. Fallback until #4 merges."""
-
-        name: str
-        ok: bool
-        detail: str
-        remedy: str
-        required: bool = True
 
 
 class MediaUnreadable(Exception):
@@ -56,8 +40,13 @@ class MediaUnreadable(Exception):
 class LocalFileSource:
     name = "local"
 
-    def __init__(self, *, timeout_s: float = _TIMEOUT_S) -> None:
-        self._timeout_s = timeout_s
+    def __init__(
+        self,
+        *,
+        config: Config | None = None,
+        timeout_s: float | None = None,
+    ) -> None:
+        self._timeout_s = _resolve_timeout(config, timeout_s)
 
     def matches(self, raw_input: str) -> bool:
         try:
@@ -83,7 +72,7 @@ class LocalFileSource:
 
     def fetch_media(self, resolved: Resolved, dest_dir: Path) -> Path:
         dest_dir.mkdir(parents=True, exist_ok=True)
-        cached = reused_media(dest_dir)
+        cached = reused_media(dest_dir, resolved.video_id)
         if cached is not None:
             return cached
         original = Path(resolved.source)
@@ -118,7 +107,7 @@ def cli_flags() -> list:
     return []
 
 
-def preflight_checks(config: object) -> list[Check]:
+def preflight_checks(config: Config) -> list[Check]:
     del config
     try:
         proc = subprocess.run(
@@ -165,7 +154,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def ffprobe_duration(path: Path, *, timeout_s: float = _TIMEOUT_S) -> float:
+def ffprobe_duration(path: Path, *, timeout_s: float = _DEFAULT_TIMEOUT_S) -> float:
     def run() -> subprocess.CompletedProcess[str]:
         try:
             proc = subprocess.run(
@@ -217,7 +206,12 @@ def find_media(dest_dir: Path) -> Path | None:
     return found[0] if found else None
 
 
-def reused_media(dest_dir: Path) -> Path | None:
+def reused_media(dest_dir: Path, video_id: str) -> Path | None:
+    """Reuse when on-disk hash matches media.json and the entry is for ``video_id``.
+
+    Local sources set ``sha256`` to the file digest (equal to ``video_id``). HTTP
+    sources set ``sha256`` to the content digest and ``video_id`` to the URL id.
+    """
     meta_path = dest_dir / "media.json"
     if not meta_path.is_file():
         return None
@@ -225,13 +219,24 @@ def reused_media(dest_dir: Path) -> Path | None:
         meta = json.loads(meta_path.read_text())
     except json.JSONDecodeError:
         return None
-    expected = meta.get("sha256")
+    meta_sha = meta.get("sha256")
     media = find_media(dest_dir)
-    if not expected or media is None:
+    if not meta_sha or media is None:
         return None
-    if sha256_file(media) == expected:
+    # Local: meta_sha == video_id. HTTP: explicit video_id field.
+    if meta.get("video_id", meta_sha) != video_id:
+        return None
+    if sha256_file(media) == meta_sha:
         return media
     return None
+
+
+def _resolve_timeout(config: Config | None, timeout_s: float | None) -> float:
+    if timeout_s is not None:
+        return timeout_s
+    if config is not None:
+        return config.timeout_s
+    return _DEFAULT_TIMEOUT_S
 
 
 def _fetched_at() -> str:

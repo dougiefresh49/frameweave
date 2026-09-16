@@ -9,6 +9,7 @@ full URL is kept only in memory, keyed by ``video_id``.
 from __future__ import annotations
 
 import hashlib
+import logging
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -16,12 +17,12 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import httpx
 
+from frameweave.config import Check, Config
 from frameweave.sources.local import (
-    _TIMEOUT_S,
-    Check,
     MediaUnreadable,
     _fetched_at,
     _remove_other_media,
+    _resolve_timeout,
     ffprobe_duration,
     reused_media,
     sha256_file,
@@ -31,11 +32,13 @@ from frameweave.types import Resolved, Segment
 from frameweave.util.media import NotMediaError, sniff
 from frameweave.util.retry import Outcome, RequestFailed, RequestTimeout, RetryExhausted, call
 
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 _NOT_MEDIA = (
     "That URL returned a web page, not a video. Download it in your browser and pass the file."
 )
-_RANGE = {"Range": "bytes=0-65535"}
-_RANGE_LIMIT = 65_536
+_SNIFF_LIMIT = 65_536
+_RANGE = {"Range": f"bytes=0-{_SNIFF_LIMIT - 1}"}
 _CRED_KEYS = frozenset({"sig", "signature", "token", "key", "expires", "se", "sp"})
 _YOUTUBE_HOSTS = frozenset(
     {
@@ -61,7 +64,8 @@ class SourceUnavailable(Exception):
 @dataclass(frozen=True)
 class _Probe:
     status_code: int
-    headers: httpx.Headers
+    content_type: str | None
+    content_length: int | None
 
 
 class HttpSource:
@@ -70,13 +74,15 @@ class HttpSource:
     def __init__(
         self,
         *,
-        timeout_s: float = _TIMEOUT_S,
+        config: Config | None = None,
+        timeout_s: float | None = None,
         client: httpx.Client | None = None,
     ) -> None:
-        self._timeout_s = timeout_s
+        self._timeout_s = _resolve_timeout(config, timeout_s)
         self._client = client
         self._full_urls: dict[str, str] = {}
         self._after: dict[str, Resolved] = {}
+        self._probes: dict[str, _Probe] = {}
 
     def matches(self, raw_input: str) -> bool:
         parts = urlsplit(raw_input)
@@ -90,8 +96,9 @@ class HttpSource:
     def resolve(self, raw_input: str) -> Resolved:
         redacted = redact_url(raw_input)
         video_id = _url_id(raw_input)
-        self._head_or_range(raw_input, redacted)
+        probe = self._head_or_range(raw_input, redacted)
         self._full_urls[video_id] = raw_input
+        self._probes[video_id] = probe
         return Resolved(
             video_id=video_id,
             title=_title(raw_input),
@@ -103,7 +110,7 @@ class HttpSource:
 
     def fetch_media(self, resolved: Resolved, dest_dir: Path) -> Path:
         dest_dir.mkdir(parents=True, exist_ok=True)
-        cached = reused_media(dest_dir)
+        cached = reused_media(dest_dir, resolved.video_id)
         if cached is not None:
             self._after[str(dest_dir)] = replace(
                 resolved, duration=ffprobe_duration(cached, timeout_s=self._timeout_s)
@@ -111,15 +118,21 @@ class HttpSource:
             return cached
         full_url = self._full_urls.get(resolved.video_id)
         if full_url is None:
-            raise SourceUnavailable(0, resolved.source)
+            raise LookupError(
+                f"no full URL for {resolved.video_id}; call resolve on this HttpSource first"
+            )
         redacted = redact_url(full_url)
         dest, content_type = self._download(full_url, redacted, dest_dir)
+        probe = self._probes.get(resolved.video_id)
+        if content_type is None and probe is not None:
+            content_type = probe.content_type
         write_json(
             dest_dir / "media.json",
             {
                 "url": redacted,
                 "content_type": content_type,
                 "sha256": sha256_file(dest),
+                "video_id": resolved.video_id,
                 "bytes": dest.stat().st_size,
                 "fetched_at": _fetched_at(),
             },
@@ -142,7 +155,11 @@ class HttpSource:
     def _client_ctx(self) -> AbstractContextManager[httpx.Client]:
         if self._client is not None:
             return nullcontext(self._client)
-        return httpx.Client(timeout=self._timeout_s, follow_redirects=True)
+        return httpx.Client(
+            timeout=self._timeout_s,
+            follow_redirects=True,
+            trust_env=False,
+        )
 
     def _head_or_range(self, url: str, redacted: str) -> _Probe:
         last_status = 0
@@ -166,7 +183,7 @@ class HttpSource:
             raise SourceUnavailable(last_status, redacted) from exc
 
         if _is_success(head_resp.status_code):
-            return _Probe(head_resp.status_code, head_resp.headers)
+            return _probe_from_headers(head_resp.status_code, head_resp.headers)
 
         def ranged() -> _Probe:
             nonlocal last_status
@@ -174,10 +191,10 @@ class HttpSource:
                 last_status = resp.status_code
                 headers = resp.headers
                 if _is_success(resp.status_code):
-                    _drain(resp, _RANGE_LIMIT)
-                    return _Probe(resp.status_code, headers)
+                    _drain(resp, _SNIFF_LIMIT)
+                    return _probe_from_headers(resp.status_code, headers)
                 if _is_retryable(resp.status_code):
-                    return _Probe(resp.status_code, headers)
+                    return _probe_from_headers(resp.status_code, headers)
                 raise SourceUnavailable(resp.status_code, redacted)
 
         try:
@@ -204,7 +221,7 @@ class HttpSource:
                     last_status = resp.status_code
                     content_type = resp.headers.get("content-type")
                     if _is_retryable(resp.status_code):
-                        return _Probe(resp.status_code, resp.headers)
+                        return _probe_from_headers(resp.status_code, resp.headers)
                     if not _is_success(resp.status_code):
                         raise SourceUnavailable(resp.status_code, redacted)
                     with partial.open("wb") as out:
@@ -213,10 +230,10 @@ class HttpSource:
                                 continue
                             out.write(chunk)
                             if kind is None:
-                                need = 16 - len(head)
-                                if need > 0:
-                                    head.extend(chunk[:need])
-                                if len(head) >= 16:
+                                remain = _SNIFF_LIMIT - len(head)
+                                if remain > 0:
+                                    head.extend(chunk[:remain])
+                                if len(head) >= _SNIFF_LIMIT:
                                     kind = _sniff_or_raise(bytes(head))
                         if kind is None:
                             kind = _sniff_or_raise(bytes(head))
@@ -239,7 +256,7 @@ class HttpSource:
         except RequestTimeout:
             partial.unlink(missing_ok=True)
             raise
-        if not isinstance(dest, Path) or dest.suffix == "":
+        if not isinstance(dest, Path):
             raise SourceUnavailable(last_status, redacted)
         return dest, content_type
 
@@ -282,7 +299,7 @@ def cli_flags() -> list:
     return []
 
 
-def preflight_checks(config: object) -> list[Check]:
+def preflight_checks(config: Config) -> list[Check]:
     del config
     return []
 
@@ -355,6 +372,20 @@ def _drain(resp: httpx.Response, limit: int) -> None:
         n += len(chunk)
         if n >= limit:
             break
+
+
+def _probe_from_headers(status_code: int, headers: httpx.Headers) -> _Probe:
+    raw_len = headers.get("content-length")
+    length: int | None
+    try:
+        length = int(raw_len) if raw_len is not None else None
+    except ValueError:
+        length = None
+    return _Probe(
+        status_code=status_code,
+        content_type=headers.get("content-type"),
+        content_length=length,
+    )
 
 
 def _sniff_or_raise(data: bytes):
