@@ -6,6 +6,8 @@ import io
 import json
 from pathlib import Path
 
+import pytest
+
 from frameweave.cli import _collect_flags, _flags_dict, cli_flags, main, preflight_checks
 from frameweave.config import load
 from frameweave.stt.base import SttResult
@@ -432,6 +434,41 @@ def test_flags_dict_passes_config_dests() -> None:
         toml_path=MISSING_TOML,
         dotenv_paths=[],
     )
+
+
+def test_inspect_prints_lane_projection_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #26: inspect prints one projection row per candidate lane."""
+    from datetime import UTC, datetime
+
+    from frameweave.vision.choose import Snapshot
+
+    snap = Snapshot(
+        generated_at=datetime(2026, 9, 16, 18, 0, 0, tzinfo=UTC),
+        metrics={
+            "claude": {"five_hour": 10.0, "seven_day": 20.0},
+            "openai": {"primary": 5.0, "secondary": 15.0},
+        },
+    )
+    monkeypatch.setattr("frameweave.cli.load_snapshot", lambda *a, **k: snap)
+
+    video = _video(tmp_path)
+    kwargs = _load_kwargs(tmp_path)
+    kwargs["env"] = {**kwargs["env"], "FRAMEWEAVE_VISION_LANE": "auto"}
+    buf = io.StringIO()
+    code = main(
+        ["inspect", str(video)],
+        backends={"source": FakeSource(video=video)},
+        stdout=buf,
+        **kwargs,
+    )
+    assert code == 0
+    text = buf.getvalue()
+    assert "lane projection:" in text
+    assert "claude" in text
+    assert "gemini" in text
+    assert "chosen:" in text
 
 
 def test_no_dollars_line_for_lane_none(tmp_path: Path) -> None:

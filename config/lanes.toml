@@ -1,0 +1,26 @@
+# Vision lane token and quota coefficients (decision 48).
+# Recalibrate with `frameweave lanes recalibrate` and paste the result here.
+
+[claude]
+a = 3997
+b = 2034
+c = 200
+# percent of the window consumed per 1k tokens
+five_hour = 0.0166
+seven_day = 0.004
+
+[gemini]
+a = 300
+b = 1265
+c = 200
+usd_in_per_1k = 0.0003
+usd_out_per_1k = 0.0025
+
+# Codex is never an auto candidate (decision 47). Coefficients exist only so an
+# explicit `--vision codex` run can still print a projection row.
+[codex]
+a = 5000
+b = 3000
+c = 200
+primary = 0.0
+secondary = 0.0
