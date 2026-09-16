@@ -1,0 +1,4 @@
+You are given {n} video frame image(s), 1280x720 screenshots from a screen recording. Return JSON only, no prose, no code fence: a list with one object per image in the order given, each object {{"frame": <index starting at 1>, "description": <one sentence>, "text": [<on-screen strings you can read with certainty, verbatim, including numbers, file names, tab titles, captions>], "illegible": <true if any visible text is too small or blurred to read with certainty>}}. Rules: transcribe, never infer or complete; if unsure of a single character, leave that string out rather than guess; an empty list is the right answer when there is no readable text. Every frame index must appear exactly once.
+
+What was being said around these frames, for disambiguation only, never a source of on-screen text:
+{context}

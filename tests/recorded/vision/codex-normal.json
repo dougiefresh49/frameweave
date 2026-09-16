@@ -1,0 +1,5 @@
+{
+  "_fixture_note": "Hand-written from the real codex exec stdout and trailing token report observed in spike/provider-fit.",
+  "stdout": "[{\"frame\":1,\"description\":\"A terminal window.\",\"text\":[\"QUEUE_NAME=jobs\"],\"illegible\":false}]",
+  "stderr": "tokens used\n1,234\n"
+}
