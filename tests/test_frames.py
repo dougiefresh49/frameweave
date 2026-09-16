@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import math
 import subprocess
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
+from frameweave import config as fw_config
+from frameweave import frames as frames_mod
 from frameweave.frames import (
+    FfmpegError,
     FramePlan,
     cli_flags,
     contact_sheet,
@@ -79,6 +84,9 @@ def test_starts_exceed_windows_merge_final_covered() -> None:
     assert result.budget == 4
     assert result.windows
     assert result.windows[-1][1] == pytest.approx(60.0)
+    min_span = math.ceil(60 / 4)
+    for start, end in result.windows:
+        assert end - start >= min_span
     assert len(result.frames) <= 4
     assert result.frames[-1].time == pytest.approx(result.windows[-1][0], abs=0.15)
     assert _kinds(result) == ["primary"] * len(result.frames)
@@ -186,11 +194,91 @@ def test_contact_sheet_count(tmp_path: Path) -> None:
         assert path.exists() and path.stat().st_size > 0
 
 
+def test_imports_flag_check_config_from_config() -> None:
+    """Finding 1: no local FlagSpec/Check/Config fallbacks; config owns them."""
+    assert frames_mod.FlagSpec is fw_config.FlagSpec
+    assert frames_mod.Check is fw_config.Check
+    assert frames_mod.Config is fw_config.Config
+    source = Path(frames_mod.__file__).read_text()
+    assert "except ImportError" not in source
+    assert "class FlagSpec" not in source
+    assert "class Check" not in source
+    assert "class Config" not in source
+
+
+def test_cli_flags_frame_width_only() -> None:
+    """Finding 2: config owns --max-frames/--frame-interval; frames keeps --frame-width."""
+    flags = {item.name: item for item in cli_flags()}
+    assert set(flags) == {"--frame-width"}
+    assert flags["--frame-width"].dest == "frame_width" and flags["--frame-width"].type is int
+    config_names = {item.name for item in fw_config.cli_flags()}
+    assert "--max-frames" in config_names
+    assert "--frame-interval" in config_names
+
+
+def test_preflight_catches_timeout_expired(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finding 3: hung ffmpeg raises TimeoutExpired; preflight must catch it."""
+    monkeypatch.setattr(frames_mod.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.TimeoutExpired(cmd=["ffmpeg", "-version"], timeout=5)
+
+    monkeypatch.setattr(frames_mod.subprocess, "run", boom)
+    checks = preflight_checks(_cfg())
+    assert len(checks) == 1
+    assert checks[0].ok is False
+    assert checks[0].remedy == "brew install ffmpeg"
+
+
+def test_drawtext_fallback_warns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finding 4: silent drawtext fallback is a bug; warn and resolve font or omit it."""
+    calls: list[str | None] = []
+
+    def fake_encode(_dest: Path, _lavfi: str, vf: str | None) -> bool:
+        calls.append(vf)
+        return vf is None
+
+    monkeypatch.setattr(make_synthetic, "_encode", fake_encode)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        make_synthetic.make(tmp_path / "synth.mp4", seconds=1)
+    assert len(calls) == 2
+    assert calls[0] is not None and "drawtext=" in calls[0]
+    assert "fontfile=/System/Library/Fonts/Supplemental/Arial.ttf" not in (
+        calls[0] or ""
+    ) or Path("/System/Library/Fonts/Supplemental/Arial.ttf").is_file()
+    # When no candidate exists, fontfile must be omitted (ffmpeg default).
+    with patch.object(make_synthetic, "_FONT_CANDIDATES", ()):
+        filt = make_synthetic._drawtext_filter()
+    assert filt.startswith("drawtext=")
+    assert "fontfile=" not in filt
+    assert any(
+        issubclass(w.category, UserWarning) and "drawtext unavailable" in str(w.message)
+        for w in caught
+    )
+
+
+def test_ffmpeg_nonzero_raises_ffmpeg_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 5: nonzero ffmpeg exit is FfmpegError, not a bare RuntimeError."""
+    media = tmp_path / "missing.mp4"
+    media.write_bytes(b"not-a-video")
+    planned = _manual_plan(0.0)
+
+    def fake_call(fn: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(
+            args=["ffmpeg"], returncode=1, stdout=b"", stderr=b"boom"
+        )
+
+    monkeypatch.setattr(frames_mod, "call", fake_call)
+    with pytest.raises(FfmpegError, match="ffmpeg failed"):
+        extract(media, planned, tmp_path / "run", _cfg())
+    assert issubclass(FfmpegError, RuntimeError)
+
+
 def test_cli_flags_and_preflight() -> None:
     flags = {item.name: item for item in cli_flags()}
-    assert flags["--max-frames"].dest == "max_frames" and flags["--max-frames"].type is int
-    assert flags["--frame-interval"].dest == "frame_interval_s"
-    assert flags["--frame-interval"].type is float
     assert flags["--frame-width"].dest == "frame_width" and flags["--frame-width"].type is int
     checks = preflight_checks(_cfg())
     assert checks[0].name == "ffmpeg"

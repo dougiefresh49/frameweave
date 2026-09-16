@@ -9,36 +9,10 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from frameweave.config import Check, Config, FlagSpec
 from frameweave.types import Frame, Segment
 from frameweave.util import timecode
 from frameweave.util.retry import Outcome, call
-
-try:
-    from frameweave.config import Check, Config, FlagSpec
-except ImportError:  # issue #4 owns these records; this worktree may not have it yet
-    from typing import Protocol
-
-    @dataclass(frozen=True)
-    class FlagSpec:
-        name: str
-        dest: str
-        type: object
-        help: str
-        default: object = None
-
-    @dataclass(frozen=True)
-    class Check:
-        name: str
-        ok: bool
-        detail: str
-        remedy: str
-        required: bool = True
-
-    class Config(Protocol):
-        frame_interval_s: float
-        frame_width: int
-        max_frames: int | None
-        timeout_s: float
 
 _NEAR_S = 5.0
 _JPEG_Q = "4"
@@ -46,6 +20,10 @@ _SHEET_CELL = 426
 _SHEET_HEIGHT = 240
 _FFMPEG_REMEDY = "brew install ffmpeg"
 _PAD_COLOR = f"color=c=black:s={_SHEET_CELL}x{_SHEET_HEIGHT}:r=1:d=1"
+
+
+class FfmpegError(RuntimeError):
+    """Nonzero ffmpeg exit (no retry; ffmpeg failures are not transient)."""
 
 
 @dataclass(frozen=True)
@@ -161,13 +139,6 @@ def contact_sheet(frames: list[Frame], dest_dir: Path, per_sheet: int = 9) -> li
 
 def cli_flags() -> list[FlagSpec]:
     return [
-        FlagSpec(
-            "--max-frames",
-            "max_frames",
-            int,
-            "Frame budget cap. Unset uses the duration rule.",
-        ),
-        FlagSpec("--frame-interval", "frame_interval_s", float, "Extra-frame interval in seconds."),
         FlagSpec("--frame-width", "frame_width", int, "Extracted frame width in pixels."),
     ]
 
@@ -180,7 +151,7 @@ def preflight_checks(config: Config) -> list[Check]:
         proc = subprocess.run(
             ["ffmpeg", "-version"], capture_output=True, text=True, timeout=5, check=False
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return [Check("ffmpeg", False, "not on PATH", _FFMPEG_REMEDY)]
     text = proc.stdout or proc.stderr
     first = text.splitlines()[0] if text else path
@@ -301,8 +272,6 @@ def _merged_plan(
 ) -> FramePlan:
     min_span = math.ceil(duration_s / budget)
     windows = _merge_windows(spans, float(min_span))
-    while len(windows) > budget and len(windows) >= 2:
-        windows = [(windows[0][0], windows[1][1]), *windows[2:]]
     picked: list[Frame] = []
     for start, _end in windows:
         time = round(start, 1)
@@ -427,5 +396,5 @@ def _run_ffmpeg(args: list[str], timeout_s: float) -> subprocess.CompletedProces
     proc = call(fn, timeout_s=timeout_s, classify=_classify_ffmpeg)
     if proc.returncode != 0:
         err = proc.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {err[-500:]}")
+        raise FfmpegError(f"ffmpeg failed ({proc.returncode}): {err[-500:]}")
     return proc
