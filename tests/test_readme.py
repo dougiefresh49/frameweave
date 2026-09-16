@@ -173,6 +173,28 @@ def _write(tmp_path: Path, content: str, name: str = "transcript.fwv") -> Path:
     return path
 
 
+def test_source_formats_numeric_duration_as_hhmmss(tmp_path: Path) -> None:
+    transcript = _write(tmp_path, EXAMPLE.read_text())
+    content = render(tmp_path, transcript, _meta(duration=224.608333), _cost())
+    source = content.split("## Source")[1].split("## ")[0]
+    assert "- Duration: 00:03:45" in source
+    assert "224.608333" not in source
+
+
+def test_source_passes_string_duration_through(tmp_path: Path) -> None:
+    transcript = _write(tmp_path, EXAMPLE.read_text())
+    content = render(tmp_path, transcript, _meta(duration="00:30:00"), _cost())
+    source = content.split("## Source")[1].split("## ")[0]
+    assert "- Duration: 00:30:00" in source
+
+
+def test_provenance_formats_total_cost_two_decimals(tmp_path: Path) -> None:
+    transcript = _write(tmp_path, EXAMPLE.read_text())
+    content = render(tmp_path, transcript, _meta(), _cost(total_usd=0))
+    provenance = content.split("## Provenance")[1]
+    assert "- Total cost: $0.00" in provenance
+
+
 def test_section_order_without_speakers(tmp_path: Path) -> None:
     transcript = _write(tmp_path, EXAMPLE.read_text())
     content = render(tmp_path, transcript, _meta(), _cost())
