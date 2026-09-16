@@ -23,9 +23,13 @@ _RATE_LIMIT_REASON = "captions rate-limited (429); speech falls through to STT"
 _NO_SUBTITLES_REASON = "no English subtitles; speech falls through to STT"
 _TAG = re.compile(r"<[^>]+>")
 _SENTENCE_END = re.compile(r"[.!?][\"']?$")
-_AUTO_MARKERS = frozenset({"auto", "automatic", "asr", "orig"})
-_MANUAL_MARKERS = frozenset({"manual", "human"})
 _FORMATS = frozenset({"json", "json3", "vtt"})
+_HTTP_429 = "http error 429"
+_TRANSIENT_PHRASES = (
+    "connection reset",
+    "unable to download webpage",
+)
+_HTTP_5XX = re.compile(r"http error 5\d{2}\b")
 
 
 @dataclass(frozen=True)
@@ -59,11 +63,11 @@ def fetch(
     runner=None,
 ) -> CaptionsResult:
     """Fetch the best English track without downloading media."""
-    mode = getattr(config, "captions_mode", "auto")
+    mode = config.captions_mode
     if mode == "none":
-        return _publish_none(dest_dir, "captions disabled", Usage())
+        return _publish_none("captions disabled", Usage())
     if mode not in {"auto", "manual"}:
-        return _publish_none(dest_dir, f"unsupported captions mode: {mode}", Usage())
+        return _publish_none(f"unsupported captions mode: {mode}", Usage())
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".captions-", dir=dest_dir))
@@ -107,30 +111,21 @@ def fetch(
     try:
         call(invoke, timeout_s=config.timeout_s, classify=_classify)
         usage = Usage(calls=calls, seconds=time.monotonic() - started)
-        if _is_rate_limited(_result_text(last)):
-            return _publish_none(dest_dir, _RATE_LIMIT_REASON, usage)
         tracks = [_read_track(path) for path in _caption_files(staging)]
         chosen = _choose_track(tracks, mode)
         if chosen is None:
-            reason = _NO_SUBTITLES_REASON
-            detail = _result_text(last)
-            if _is_rate_limited(detail):
-                reason = _RATE_LIMIT_REASON
-            elif _says_no_subtitles(detail):
-                reason = _NO_SUBTITLES_REASON
-            return _publish_none(dest_dir, reason, usage)
+            return _publish_none(_NO_SUBTITLES_REASON, usage)
 
         final_path = dest_dir / f"captions.{chosen.language}.{chosen.path.suffix.lstrip('.')}"
         chosen.path.replace(final_path)
         result = _result_for_track(chosen, usage)
         _publish_json(dest_dir / "captions.json", _result_dict(result))
-        (dest_dir / "captions.none").unlink(missing_ok=True)
         return result
     except Exception as exc:
         usage = Usage(calls=calls, seconds=time.monotonic() - started)
         result_detail = _result_text(last)
         detail = f"{result_detail}\n{exc}"
-        if _is_rate_limited(detail):
+        if _nonzero(last) and _is_rate_limited(result_detail):
             reason = _RATE_LIMIT_REASON
         elif _says_no_subtitles(detail):
             reason = _NO_SUBTITLES_REASON
@@ -139,7 +134,7 @@ def fetch(
         else:
             message = _last_line(result_detail) or _last_line(str(exc)) or type(exc).__name__
             reason = f"captions unavailable: {message}; speech falls through to STT"
-        return _publish_none(dest_dir, reason, usage)
+        return _publish_none(reason, usage)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
@@ -149,10 +144,9 @@ def expose(dest_dir: Path) -> CaptionsResult:
     tracks = [_read_track(path) for path in _caption_files(dest_dir)]
     chosen = _choose_track(tracks, "auto")
     if chosen is None:
-        return _publish_none(dest_dir, _NO_SUBTITLES_REASON, Usage())
+        return _publish_none(_NO_SUBTITLES_REASON, Usage())
     result = _result_for_track(chosen, Usage())
     _publish_json(dest_dir / "captions.json", _result_dict(result))
-    (dest_dir / "captions.none").unlink(missing_ok=True)
     return result
 
 
@@ -177,7 +171,14 @@ def _classify(value: object) -> Outcome:
         return Outcome("timeout")
     if isinstance(value, Exception):
         return Outcome("fail")
-    return Outcome("ok" if getattr(value, "returncode", 1) == 0 else "fail")
+    if getattr(value, "returncode", 1) == 0:
+        return Outcome("ok")
+    detail = _result_text(value)
+    if _is_rate_limited(detail) or _says_no_subtitles(detail):
+        return Outcome("fail")
+    if _is_transient(detail):
+        return Outcome("retry")
+    return Outcome("fail")
 
 
 def _caption_files(directory: Path) -> list[Path]:
@@ -194,27 +195,22 @@ def _caption_files(directory: Path) -> list[Path]:
 
 
 def _read_track(path: Path) -> _Track:
-    language, marked_kind = _track_identity(path)
+    language, kind = _track_identity(path)
     suffix = path.suffix.lower()
     cues = _parse_vtt(path) if suffix == ".vtt" else _parse_json3(path)
-    kind = marked_kind or ("automatic" if _looks_rolling(cues) else "manual")
     return _Track(path=path, language=language, kind=kind, cues=cues)
 
 
-def _track_identity(path: Path) -> tuple[str, str | None]:
+def _track_identity(path: Path) -> tuple[str, str]:
+    """Derive language and kind from the yt-dlp track name (e.g. ``en``, ``en-orig``)."""
     pieces = path.name.split(".")[1:-1]
-    kind: str | None = None
-    language_parts: list[str] = []
-    for piece in pieces:
-        lowered = piece.lower()
-        if lowered in _AUTO_MARKERS:
-            kind = "automatic"
-        elif lowered in _MANUAL_MARKERS:
-            kind = "manual"
-        else:
-            language_parts.append(piece)
-    language = ".".join(language_parts) or "en"
+    language = ".".join(pieces) or "en"
+    kind = "automatic" if _is_automatic_track_name(language) else "manual"
     return language, kind
+
+
+def _is_automatic_track_name(language: str) -> bool:
+    return "-orig" in language.lower()
 
 
 def _choose_track(tracks: list[_Track], mode: str) -> _Track | None:
@@ -300,16 +296,6 @@ def _clean_text(value: str) -> str:
     return " ".join(html.unescape(_TAG.sub("", value)).replace("\xa0", " ").split())
 
 
-def _looks_rolling(cues: list[_Cue]) -> bool:
-    if len(cues) < 2:
-        return False
-    overlaps = sum(
-        _overlap_size(previous.text, current.text) > 0
-        for previous, current in zip(cues, cues[1:], strict=False)
-    )
-    return overlaps >= 2 and overlaps / (len(cues) - 1) >= 0.2
-
-
 def _deduplicate(cues: list[_Cue]) -> list[_Cue]:
     kept: list[_Cue] = []
     seen: set[str] = set()
@@ -320,7 +306,7 @@ def _deduplicate(cues: list[_Cue]) -> list[_Cue]:
             previous = normalized or previous
             continue
         words = normalized.split()
-        overlap = _overlap_size(previous, normalized)
+        overlap = _usable_overlap(previous, normalized)
         new_text = " ".join(words[overlap:])
         seen.add(normalized)
         previous = normalized
@@ -335,6 +321,17 @@ def _overlap_size(previous: str, current: str) -> int:
     for size in range(min(len(before), len(after)), 0, -1):
         if before[-size:] == after[:size]:
             return size
+    return 0
+
+
+def _usable_overlap(previous: str, current: str) -> int:
+    """Strip rolling prefix only when it is the whole previous cue or at least 2 words."""
+    overlap = _overlap_size(previous, current)
+    if overlap == 0:
+        return 0
+    previous_words = previous.split()
+    if overlap == len(previous_words) or overlap >= 2:
+        return overlap
     return 0
 
 
@@ -399,12 +396,8 @@ def _result_dict(result: CaptionsResult) -> dict[str, object]:
     }
 
 
-def _publish_none(dest_dir: Path, reason: str, usage: Usage) -> CaptionsResult:
-    result = CaptionsResult([], "none", None, reason, usage)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    _publish_json(dest_dir / "captions.none", _result_dict(result))
-    (dest_dir / "captions.json").unlink(missing_ok=True)
-    return result
+def _publish_none(reason: str, usage: Usage) -> CaptionsResult:
+    return CaptionsResult([], "none", None, reason, usage)
 
 
 def _publish_json(path: Path, payload: dict[str, object]) -> None:
@@ -428,9 +421,21 @@ def _result_text(result: object | None) -> str:
     )
 
 
+def _nonzero(result: object | None) -> bool:
+    if result is None or isinstance(result, Exception):
+        return True
+    return getattr(result, "returncode", 1) != 0
+
+
 def _is_rate_limited(text: str) -> bool:
+    return _HTTP_429 in text.lower()
+
+
+def _is_transient(text: str) -> bool:
     lowered = text.lower()
-    return "429" in lowered or "rate limit" in lowered or "too many requests" in lowered
+    if any(phrase in lowered for phrase in _TRANSIENT_PHRASES):
+        return True
+    return _HTTP_5XX.search(lowered) is not None
 
 
 def _says_no_subtitles(text: str) -> bool:

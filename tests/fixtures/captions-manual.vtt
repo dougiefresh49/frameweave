@@ -22,13 +22,13 @@ Automatic tracks often repeat their recent caption lines
 The parser removes that overlap without losing speech
 
 00:00:21.000 --> 00:00:24.000
-Clean timestamps keep every observation in proper order
+Clean timestamps keep every observation in proper order.
 
 00:00:24.000 --> 00:00:27.000
-Short cues accumulate into useful readable transcript sections
+Short cues accumulate and I think so
 
 00:00:27.000 --> 00:00:30.000
-This opening section ends with a clear sentence.
+so This opening section ends with a clear sentence
 
 00:00:30.000 --> 00:00:33.000
 Next we compare the visible frames with spoken context
