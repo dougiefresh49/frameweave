@@ -20,6 +20,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install ffmpeg (the tool requires it; tests extract frames and audio)
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get update -q && sudo apt-get install -y -q ffmpeg; else brew install ffmpeg; fi
+          ffmpeg -version | head -1
+
       - name: Sync
         run: uv sync --group dev
 
