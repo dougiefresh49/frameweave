@@ -228,14 +228,18 @@ def _mangles_section(transcript_text: str, glossary: dict[str, Any] | None) -> s
         if _occurs(m["heard"], transcript_text)
     ]
     if glossary:
-        for entry in glossary.get("entries", []):
-            rows.append(
-                (
-                    entry.get("heard", _UNKNOWN),
-                    entry.get("meant", _UNKNOWN),
-                    entry.get("context", _UNKNOWN),
+        entries = glossary.get("entries", [])
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                rows.append(
+                    (
+                        entry.get("heard", _UNKNOWN),
+                        entry.get("meant", _UNKNOWN),
+                        entry.get("context", _UNKNOWN),
+                    )
                 )
-            )
     if not rows:
         body = "None of the seeded caption mangles occur in this transcript."
     else:
@@ -269,7 +273,7 @@ def _limits_section(meta: dict[str, Any]) -> str:
     else:
         lines.append(f"- Completion: {completion}.")
     warnings = _field(meta, "warnings", default=[])
-    if warnings:
+    if isinstance(warnings, list) and warnings:
         lines.append("- Warnings:")
         lines.extend(f"  - {w}" for w in warnings)
     else:
@@ -340,6 +344,16 @@ def preflight_checks(config: Config) -> list[Check]:
         return [
             Check(name="glossary", ok=False, detail=f"{path} did not parse: {exc}", remedy=remedy)
         ]
-    ok = isinstance(data, dict) and isinstance(data.get("entries"), list)
-    detail = f"{path} parses" if ok else f"{path} is missing an 'entries' list"
+    entries = data.get("entries") if isinstance(data, dict) else None
+    ok = (
+        isinstance(data, dict)
+        and isinstance(entries, list)
+        and all(isinstance(entry, dict) for entry in entries)
+    )
+    if ok:
+        detail = f"{path} parses"
+    elif not isinstance(entries, list):
+        detail = f"{path} is missing an 'entries' list"
+    else:
+        detail = f"{path} has a non-dict entry in 'entries'"
     return [Check(name="glossary", ok=ok, detail=detail, remedy=remedy)]

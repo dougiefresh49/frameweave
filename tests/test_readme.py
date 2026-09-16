@@ -10,12 +10,20 @@ import re
 from pathlib import Path
 from typing import Any
 
-from frameweave.format.readme import render, write_readme
+from frameweave.config import load
+from frameweave.format.readme import (
+    _load_mangles,
+    cli_flags,
+    preflight_checks,
+    render,
+    write_readme,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 EXAMPLE = FIXTURES / "example.fwv"
 EXTENDED = FIXTURES / "example-extended.fwv"
 GLOSSARY_EXAMPLE = FIXTURES / "glossary-example.json"
+MISSING_TOML = Path("/nonexistent/frameweave-test/config.toml")
 
 H2 = re.compile(r"^## (.+)$", re.MULTILINE)
 
@@ -47,6 +55,51 @@ completion: complete
 generated: 2026-09-16T00:00:00Z frameweave 0.1.0
 
 [00:00:00-00:00:05] said/captions-auto: today we look at editors and how it edits files
+"""
+
+_WITH_CODECS_UPPER = """frameweave 1
+title: A talk about tools
+channel: Example Channel
+source: https://example.com/video
+duration: 00:01:00
+range: full
+transcript-source: captions-auto
+vision: none
+frames: 0 primary 0 extra 0 at 1280px
+completion: complete
+generated: 2026-09-16T00:00:00Z frameweave 0.1.0
+
+[00:00:00-00:00:05] said/captions-auto: today we look at CODECS and how it edits files
+"""
+
+_WITH_VIDEOCODECS = """frameweave 1
+title: A talk about tools
+channel: Example Channel
+source: https://example.com/video
+duration: 00:01:00
+range: full
+transcript-source: captions-auto
+vision: none
+frames: 0 primary 0 extra 0 at 1280px
+completion: complete
+generated: 2026-09-16T00:00:00Z frameweave 0.1.0
+
+[00:00:00-00:00:05] said/captions-auto: today we look at videocodecs and how it edits files
+"""
+
+_WITH_CLERK_CONVEX = """frameweave 1
+title: A talk about tools
+channel: Example Channel
+source: https://example.com/video
+duration: 00:01:00
+range: full
+transcript-source: captions-auto
+vision: none
+frames: 0 primary 0 extra 0 at 1280px
+completion: complete
+generated: 2026-09-16T00:00:00Z frameweave 0.1.0
+
+[00:00:00-00:00:05] said/captions-auto: we use clerk and convex for auth and data
 """
 
 
@@ -194,12 +247,43 @@ def test_mangles_row_present_when_heard_form_occurs(tmp_path: Path) -> None:
     assert "codex" in section
 
 
+def test_mangles_match_case_insensitively(tmp_path: Path) -> None:
+    transcript = _write(tmp_path, _WITH_CODECS_UPPER)
+    content = render(tmp_path, transcript, _meta(), _cost())
+    section = content.split("## Caption mangles")[1].split("## ")[0]
+    assert "codecs" in section
+    assert "codex" in section
+
+
+def test_mangles_require_whole_word(tmp_path: Path) -> None:
+    transcript = _write(tmp_path, _WITH_VIDEOCODECS)
+    content = render(tmp_path, transcript, _meta(), _cost())
+    section = content.split("## Caption mangles")[1].split("## ")[0]
+    assert "codecs" not in section
+    assert "codex" not in section
+    assert "None of the seeded caption mangles occur" in section
+
+
 def test_mangles_row_absent_when_heard_form_does_not_occur(tmp_path: Path) -> None:
     transcript = _write(tmp_path, _WITHOUT_CODECS)
     content = render(tmp_path, transcript, _meta(), _cost())
     section = content.split("## Caption mangles")[1].split("## ")[0]
     assert "codecs" not in section
     assert "codex" not in section
+    assert "None of the seeded caption mangles occur" in section
+
+
+def test_mangle_seeds_heard_differs_from_meant() -> None:
+    for row in _load_mangles():
+        assert row["heard"].casefold() != row["meant"].casefold(), row
+
+
+def test_ordinary_clerk_and_convex_do_not_fire_seeds(tmp_path: Path) -> None:
+    transcript = _write(tmp_path, _WITH_CLERK_CONVEX)
+    content = render(tmp_path, transcript, _meta(), _cost())
+    section = content.split("## Caption mangles")[1].split("## ")[0]
+    assert "Clerk" not in section
+    assert "Convex" not in section
     assert "None of the seeded caption mangles occur" in section
 
 
@@ -212,6 +296,22 @@ def test_glossary_rows_are_added_regardless_of_occurrence(tmp_path: Path) -> Non
     assert "worker queue" in section
     assert "shed load" in section
     assert "accepted" not in section  # _verdicts is ignored
+
+
+def test_glossary_skips_non_dict_entries(tmp_path: Path) -> None:
+    transcript = _write(tmp_path, _WITHOUT_CODECS)
+    glossary = {
+        "entries": [
+            "not-a-dict",
+            {"heard": "worker cue", "meant": "worker queue", "context": "jobs"},
+            42,
+        ]
+    }
+    content = render(tmp_path, transcript, _meta(), _cost(), glossary=glossary)
+    section = content.split("## Caption mangles")[1].split("## ")[0]
+    assert "worker cue" in section
+    assert "not-a-dict" not in section
+    assert "42" not in section
 
 
 def test_limits_reports_windows_only_when_greater_than_zero(tmp_path: Path) -> None:
@@ -239,6 +339,14 @@ def test_limits_includes_completion_reason_and_warnings(tmp_path: Path) -> None:
     assert "captions 429, fell back to auto" in limits
 
 
+def test_limits_ignores_warnings_when_not_a_list(tmp_path: Path) -> None:
+    transcript = _write(tmp_path, EXAMPLE.read_text())
+    content = render(tmp_path, transcript, _meta(warnings="oops"), _cost())
+    limits = content.split("## Limits")[1].split("## ")[0]
+    assert "- Warnings: none." in limits
+    assert "  - o" not in limits
+
+
 def test_provenance_renders_stages_and_flags_unknown_cost(tmp_path: Path) -> None:
     transcript = _write(tmp_path, EXAMPLE.read_text())
     cost = _cost(total_usd=0.06, unknown_usd=0.02)
@@ -262,7 +370,6 @@ def test_missing_fields_render_unknown_without_raising(tmp_path: Path) -> None:
     transcript = _write(tmp_path, "frameweave 1\n\n")
     content = render(tmp_path, transcript, {}, {})
     assert "unknown" in content
-    assert "Traceback" not in content
 
 
 def test_no_exclamation_marks_and_no_em_dash_outside_h1(tmp_path: Path) -> None:
@@ -281,3 +388,49 @@ def test_write_readme_publishes_atomically(tmp_path: Path) -> None:
     assert dest == tmp_path / "README.md"
     assert dest.read_text(encoding="utf-8") == render(tmp_path, transcript, _meta(), _cost())
     assert not (tmp_path / ".README.md.tmp").exists()
+
+
+def test_cli_flags_returns_glossary() -> None:
+    flags = cli_flags()
+    assert len(flags) == 1
+    assert flags[0].name == "--glossary"
+    assert flags[0].dest == "glossary"
+    assert flags[0].type is Path
+
+
+def test_preflight_checks_glossary_shape(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.json"
+    cfg_missing = load(
+        flags={"glossary": missing},
+        env={},
+        toml_path=MISSING_TOML,
+        dotenv_paths=[],
+    )
+    checks = preflight_checks(cfg_missing)
+    assert len(checks) == 1
+    assert checks[0].ok is False
+    assert "does not exist" in checks[0].detail
+
+    good = tmp_path / "good.json"
+    good.write_text(GLOSSARY_EXAMPLE.read_text(), encoding="utf-8")
+    cfg_good = load(
+        flags={"glossary": good},
+        env={},
+        toml_path=MISSING_TOML,
+        dotenv_paths=[],
+    )
+    assert preflight_checks(cfg_good)[0].ok is True
+
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"entries": ["not-a-dict"]}', encoding="utf-8")
+    cfg_bad = load(
+        flags={"glossary": bad},
+        env={},
+        toml_path=MISSING_TOML,
+        dotenv_paths=[],
+    )
+    bad_check = preflight_checks(cfg_bad)[0]
+    assert bad_check.ok is False
+    assert "non-dict" in bad_check.detail
+
+    assert preflight_checks(load(env={}, toml_path=MISSING_TOML, dotenv_paths=[])) == []

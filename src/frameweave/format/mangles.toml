@@ -188,11 +188,11 @@ meant = "Prisma"
 context = "database ORM"
 
 [[mangle]]
-heard = "clerk"
+heard = "clark"
 meant = "Clerk"
-context = "authentication and user management platform, captioned as the common word"
+context = "authentication and user management platform"
 
 [[mangle]]
-heard = "convex"
+heard = "con vex"
 meant = "Convex"
-context = "backend and database platform, captioned as the geometry term"
+context = "backend and database platform"
