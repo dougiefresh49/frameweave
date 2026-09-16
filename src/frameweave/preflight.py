@@ -2,8 +2,8 @@
 
 Issue #15 wires the CLI: load a Config (without require_out), call
 `run_doctor(config, env=os.environ, out=sys.stdout)` for the human table, or
-`print(as_json(collect(config)), file=sys.stdout)` when `--json` /
-`doctor_json` is set; exit with the returned code. `cli_flags()` contributes
+when `--json` / `doctor_json` is set print `as_json(rows)` and exit with
+`exit_code(rows)` (same int `run_doctor` returns). `cli_flags()` contributes
 the `--json` FlagSpec.
 """
 
@@ -20,13 +20,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TextIO
 
-from frameweave.config import Check, Config, FlagSpec
-
-# Exact ConfigError message from require_out (decision 4).
-_MISSING_OUT = (
-    "FRAMEWEAVE_OUT is not set. Add this line to .env (or export it): "
-    "FRAMEWEAVE_OUT=/path/to/output/folder"
-)
+from frameweave.config import Check, Config, ConfigError, FlagSpec, require_out
 
 MODULES: list[str] = [
     "frameweave.preflight",
@@ -106,13 +100,23 @@ def collect(
             by_name[check.name] = check
     # Doctor never calls require_out; still emit the ConfigError text as the row.
     if config.out is None:
+        message = _missing_out_message(config)
         by_name["output root"] = Check(
             "output root",
             False,
-            _MISSING_OUT,
-            _MISSING_OUT,
+            message,
+            message,
         )
     return list(by_name.values())
+
+
+def exit_code(rows: Sequence[Check]) -> int:
+    """Return 1 if any required row failed, else 0.
+
+    Used by `run_doctor` and by issue #15 for `--json` mode (print
+    `as_json(rows)`, then exit with this value).
+    """
+    return 1 if any((not row.ok) and row.required for row in rows) else 0
 
 
 def as_json(rows: Sequence[Check]) -> str:
@@ -137,7 +141,7 @@ def run_doctor(
     run: RunFn = subprocess.run,
     out: TextIO,
 ) -> int:
-    """Print one row per check and return 1 iff any required row failed."""
+    """Print one row per check and return `exit_code(rows)`."""
     rows = collect(config, env=env, which=which, run=run)
     failed = 0
     warnings = 0
@@ -157,7 +161,15 @@ def run_doctor(
         f"doctor: {len(rows)} checks, {failed} failed, {warnings} warnings",
         file=out,
     )
-    return 1 if failed else 0
+    return exit_code(rows)
+
+
+def _missing_out_message(config: Config) -> str:
+    try:
+        require_out(config)
+    except ConfigError as exc:
+        return str(exc)
+    raise AssertionError("require_out must raise when config.out is None")
 
 
 def _is_missing_target(modname: str, exc: ModuleNotFoundError) -> bool:
@@ -251,15 +263,21 @@ def _yt_dlp_check(*, lock_path: Path = _LOCK_PATH) -> Check:
         installed = ytdlp_version.__version__
     except Exception as exc:  # noqa: BLE001
         return Check("yt-dlp", False, str(exc), "uv sync")
-    if pin and _version_tuple(installed) < _version_tuple(pin):
+    if not pin:
+        return Check(
+            "yt-dlp",
+            True,
+            f"{installed} (lock pin unavailable)",
+            "uv sync",
+        )
+    if _version_tuple(installed) < _version_tuple(pin):
         return Check(
             "yt-dlp",
             False,
             f"{installed} (lock pin {pin})",
             "uv sync",
         )
-    detail = installed if not pin else f"{installed} (lock pin {pin})"
-    return Check("yt-dlp", True, detail, "uv sync")
+    return Check("yt-dlp", True, f"{installed} (lock pin {pin})", "uv sync")
 
 
 def _yt_dlp_pin(lock_path: Path) -> str:

@@ -12,13 +12,17 @@ from subprocess import CompletedProcess
 import pytest
 
 from frameweave import preflight
-from frameweave.config import Check, load
+from frameweave.config import Check, ConfigError, load, require_out
 
-MISSING_OUT = (
-    "FRAMEWEAVE_OUT is not set. Add this line to .env (or export it): "
-    "FRAMEWEAVE_OUT=/path/to/output/folder"
-)
 MISSING_TOML = Path("/nonexistent/frameweave-test/config.toml")
+
+
+def missing_out_message(config) -> str:
+    try:
+        require_out(config)
+    except ConfigError as exc:
+        return str(exc)
+    raise AssertionError("require_out must raise when config.out is None")
 
 
 def load_cfg(flags: dict | None = None, *, env: dict[str, str] | None = None):
@@ -142,6 +146,34 @@ def test_module_that_raises(
     assert "captions exploded" in rows["frameweave.captions"].detail
 
 
+def test_nested_missing_import_is_failed_row(
+    monkeypatch: pytest.MonkeyPatch, happy_which, happy_run, tmp_path: Path
+) -> None:
+    """ModuleNotFoundError for a dependency (not the module itself) fails the row."""
+    out = tmp_path / "out"
+    out.mkdir()
+    cache = tmp_path / "cache"
+    cfg = load_cfg(flags={"out": out, "cache_dir": cache, "vision_lane": "none"})
+
+    fake = types.ModuleType("frameweave.stt.local")
+
+    def checks(_config):
+        raise ModuleNotFoundError("No module named 'whisperx'", name="whisperx")
+
+    fake.preflight_checks = checks  # type: ignore[attr-defined]
+    stt = types.ModuleType("frameweave.stt")
+    stt.local = fake  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "frameweave.stt", stt)
+    monkeypatch.setitem(sys.modules, "frameweave.stt.local", fake)
+
+    rows = {
+        row.name: row
+        for row in preflight.collect(cfg, env={}, which=happy_which, run=happy_run)
+    }
+    assert rows["frameweave.stt.local"].ok is False
+    assert "whisperx" in rows["frameweave.stt.local"].detail
+
+
 def test_dedupe_module_wins_over_builtin(
     monkeypatch: pytest.MonkeyPatch, happy_which, happy_run, tmp_path: Path
 ) -> None:
@@ -172,16 +204,24 @@ def test_dedupe_module_wins_over_builtin(
 def test_missing_out_still_runs_other_rows(happy_which, happy_run, tmp_path: Path) -> None:
     cache = tmp_path / "cache"
     cfg = load_cfg(flags={"cache_dir": cache, "vision_lane": "none"})
+    expected = missing_out_message(cfg)
     rows = list(preflight.collect(cfg, env={}, which=happy_which, run=happy_run))
     by_name = {row.name: row for row in rows}
     assert by_name["output root"].ok is False
-    assert by_name["output root"].detail == MISSING_OUT
-    assert by_name["output root"].remedy == MISSING_OUT
+    assert by_name["output root"].detail == expected
+    assert by_name["output root"].remedy == expected
     assert "ffmpeg" in by_name
     assert "python" in by_name
     assert "yt-dlp" in by_name
     assert "disk" in by_name
     assert "cache dir" in by_name
+
+
+def test_exit_code_from_rows() -> None:
+    ok_rows = [Check("a", True, "ok", "n/a"), Check("b", False, "warn", "n/a", required=False)]
+    assert preflight.exit_code(ok_rows) == 0
+    fail_rows = [Check("a", False, "bad", "fix", required=True)]
+    assert preflight.exit_code(fail_rows) == 1
 
 
 def test_exit_code_matches_summary_not_print_text(happy_which, happy_run, tmp_path: Path) -> None:
@@ -219,6 +259,7 @@ def test_as_json_round_trip(happy_which, happy_run, tmp_path: Path) -> None:
         assert item["detail"] == row.detail
         assert item["remedy"] == row.remedy
         assert item["required"] is row.required
+    assert preflight.exit_code(rows) in {0, 1}
 
 
 def test_disk_warning_never_flips_exit(
@@ -300,29 +341,60 @@ def test_hf_token_required_when_speakers(happy_which, happy_run, tmp_path: Path)
 
 
 def test_claude_and_codex_lane_gates(happy_which, happy_run, tmp_path: Path) -> None:
+    """Built-ins gate on lane; vision.base may also emit both CLI rows (dedupe wins)."""
     out = tmp_path / "out"
     out.mkdir()
     cache = tmp_path / "cache"
-    auto = {
+    auto_builtins = {
         row.name: row
-        for row in preflight.collect(
+        for row in preflight._builtin_checks(
             load_cfg(flags={"out": out, "cache_dir": cache, "vision_lane": "auto"}),
             env={},
             which=happy_which,
             run=happy_run,
         )
     }
-    assert "claude" in auto
-    assert "codex" not in auto
+    assert "claude" in auto_builtins
+    assert "codex" not in auto_builtins
 
-    codex = {
+    codex_builtins = {
         row.name: row
-        for row in preflight.collect(
+        for row in preflight._builtin_checks(
             load_cfg(flags={"out": out, "cache_dir": cache, "vision_lane": "codex"}),
             env={},
             which=happy_which,
             run=happy_run,
         )
     }
-    assert "codex" in codex
-    assert "claude" not in codex
+    assert "codex" in codex_builtins
+    assert "claude" not in codex_builtins
+
+
+def test_yt_dlp_pin_from_fabricated_lock(tmp_path: Path) -> None:
+    lock = tmp_path / "uv.lock"
+    lock.write_text(
+        '[[package]]\nname = "yt-dlp"\nversion = "2025.1.2"\n',
+        encoding="utf-8",
+    )
+    assert preflight._yt_dlp_pin(lock) == "2025.1.2"
+    row = preflight._yt_dlp_check(lock_path=lock)
+    assert "lock pin 2025.1.2" in row.detail
+
+
+def test_yt_dlp_pin_unavailable_when_lock_missing(tmp_path: Path) -> None:
+    missing = tmp_path / "no-such-uv.lock"
+    row = preflight._yt_dlp_check(lock_path=missing)
+    assert row.ok is True
+    assert "lock pin unavailable" in row.detail
+
+
+def test_binary_version_passes_timeout(happy_which) -> None:
+    seen: dict[str, object] = {}
+
+    def run(argv, **kwargs):
+        seen.update(kwargs)
+        return CompletedProcess(argv, 0, stdout="ffmpeg version 8.0\n", stderr="")
+
+    row = preflight._binary_version_check("ffmpeg", happy_which, run)
+    assert row.ok is True
+    assert seen.get("timeout") == 30
