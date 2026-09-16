@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import tomllib
@@ -214,6 +215,10 @@ def output_dir(
 
 
 def run_key(config: Config, range_spec: str) -> str:
+    if config.vision_lane == "auto":
+        raise ConfigError(
+            "run_key needs a resolved vision lane; auto is chosen at run time by the lane chooser"
+        )
     glossary: str | None = None
     if config.glossary is not None:
         try:
@@ -298,12 +303,10 @@ def _env_layer(
     for path in dotenv_paths:
         parsed = dotenv_values(path)
         for key, value in parsed.items():
-            if value is None or value == "" or key in merged:
+            if value is None or key in merged:
                 continue
             merged[key] = value
     for key, value in process_env.items():
-        if value == "":
-            continue
         merged[key] = value
     return merged
 
@@ -395,11 +398,13 @@ def _as_json_dict(raw: str, key: str, source: str) -> dict[str, str]:
 
 
 def _coerce(kind: str, value: object, key: str, source: str) -> object:
+    if kind in {"opt_int", "opt_path"} and _is_blank(value):
+        return None
+    if kind not in {"opt_int", "opt_path"} and _is_blank(value):
+        raise ConfigError(f"unparseable value for {key} from {source}: {value!r}")
     if kind == "int":
         return _as_int(value, key, source)
     if kind == "opt_int":
-        if _is_blank(value):
-            return None
         return _as_int(value, key, source)
     if kind == "time":
         return _as_time(value, key, source)
@@ -408,8 +413,6 @@ def _coerce(kind: str, value: object, key: str, source: str) -> object:
     if kind == "path":
         return _as_path(value, key, source, optional=False)
     if kind == "opt_path":
-        if _is_blank(value):
-            return None
         return _as_path(value, key, source, optional=True)
     if kind == "lane":
         text = _as_str(value, key, source)
@@ -445,7 +448,10 @@ def _as_time(value: object, key: str, source: str) -> float:
     if isinstance(value, bool):
         raise ConfigError(f"unparseable value for {key} from {source}: {value!r}")
     if isinstance(value, (int, float)):
-        return float(value)
+        number = float(value)
+        if not math.isfinite(number) or number < 0:
+            raise ConfigError(f"unparseable value for {key} from {source}: {value!r}")
+        return number
     try:
         return timecode.parse(str(value).strip())
     except ValueError as exc:
@@ -472,9 +478,11 @@ def _as_path(value: object, key: str, source: str, *, optional: bool) -> Path | 
         raise ConfigError(f"unparseable value for {key} from {source}: {value!r}")
     if isinstance(value, Path):
         return value.expanduser()
-    if isinstance(value, (dict, list, bool)):
-        raise ConfigError(f"unparseable value for {key} from {source}: {value!r}")
-    return Path(str(value)).expanduser()
+    if isinstance(value, str):
+        return Path(value).expanduser()
+    if isinstance(value, os.PathLike):
+        return Path(value).expanduser()
+    raise ConfigError(f"unparseable value for {key} from {source}: {value!r}")
 
 
 def _as_str(value: object, key: str, source: str) -> str:

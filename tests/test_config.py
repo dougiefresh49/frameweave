@@ -20,9 +20,13 @@ from frameweave.config import (
 )
 
 MISSING_TOML = Path("/nonexistent/frameweave-test/config.toml")
+MISSING_DOTENV = Path("/nonexistent/frameweave-test/.env")
 MISSING_OUT = (
     "FRAMEWEAVE_OUT is not set. Add this line to .env (or export it): "
     "FRAMEWEAVE_OUT=/path/to/output/folder"
+)
+AUTO_LANE_MSG = (
+    "run_key needs a resolved vision lane; auto is chosen at run time by the lane chooser"
 )
 THEO = "Theo - t3\u2024gg"
 
@@ -42,6 +46,18 @@ def load_cfg(
     )
 
 
+def resolved(flags: dict | None = None, **kwargs):
+    merged = {"vision_lane": "codex", **(flags or {})}
+    return load_cfg(flags=merged, **kwargs)
+
+
+@pytest.fixture
+def fake_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    home = tmp_path / "no-such-home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    return home
+
+
 @pytest.fixture
 def tmp_root(tmp_path: Path) -> Path:
     root = tmp_path / "out"
@@ -57,10 +73,10 @@ def tmp_root(tmp_path: Path) -> Path:
     return root
 
 
-def test_load_defaults() -> None:
+def test_load_defaults(fake_home: Path) -> None:
     cfg = load_cfg()
     assert cfg.out is None
-    assert cfg.cache_dir == Path.home() / "Library" / "Caches" / "frameweave"
+    assert cfg.cache_dir == fake_home / "Library" / "Caches" / "frameweave"
     assert cfg.vision_lane == "auto"
     assert cfg.vision_model == {
         "codex": "gpt-5.6-sol",
@@ -85,20 +101,12 @@ def test_load_defaults() -> None:
     assert cfg.channels == {}
 
 
-def test_load_returns_defaults_when_home_is_missing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    missing = tmp_path / "no-such-home"
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: missing))
-    monkeypatch.chdir(tmp_path)
-    for key in list(os.environ):
-        if key.startswith("FRAMEWEAVE_"):
-            monkeypatch.delenv(key, raising=False)
-    cfg = load()
+def test_load_returns_defaults_when_home_is_missing(fake_home: Path) -> None:
+    cfg = load(env={}, toml_path=MISSING_TOML, dotenv_paths=[MISSING_DOTENV])
     assert cfg.out is None
     assert cfg.frames_per_call == 8
-    assert cfg.cache_dir == missing / "Library" / "Caches" / "frameweave"
-    assert not missing.exists()
+    assert cfg.cache_dir == fake_home / "Library" / "Caches" / "frameweave"
+    assert not fake_home.exists()
 
 
 def test_require_out_message() -> None:
@@ -129,13 +137,13 @@ def test_precedence_frames_per_call(tmp_path: Path) -> None:
     ).frames_per_call == 3
 
 
-def test_precedence_path(tmp_path: Path) -> None:
+def test_precedence_path(tmp_path: Path, fake_home: Path) -> None:
     toml_dir = tmp_path / "toml-cache"
     env_dir = tmp_path / "env-cache"
     flag_dir = tmp_path / "flag-cache"
     toml_path = tmp_path / "cfg.toml"
     toml_path.write_text(f'cache_dir = "{toml_dir.as_posix()}"\n')
-    default = Path.home() / "Library" / "Caches" / "frameweave"
+    default = fake_home / "Library" / "Caches" / "frameweave"
     assert load_cfg().cache_dir == default
     assert load_cfg(toml_path=toml_path).cache_dir == toml_dir
     assert load_cfg(
@@ -209,14 +217,12 @@ def test_dotenv_earlier_wins_and_env_beats_dotenv(tmp_path: Path) -> None:
     ).frames_per_call == 33
 
 
-def test_dotenv_does_not_mutate_os_environ(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("FRAMEWEAVE_FRAMES_PER_CALL", raising=False)
+def test_dotenv_does_not_mutate_os_environ(tmp_path: Path) -> None:
     path = tmp_path / ".env"
     path.write_text("FRAMEWEAVE_FRAMES_PER_CALL=11\n")
+    snapshot = os.environ.copy()
     load_cfg(dotenv_paths=[path])
-    assert "FRAMEWEAVE_FRAMES_PER_CALL" not in os.environ
+    assert os.environ == snapshot
 
 
 def test_tilde_expansion(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -255,6 +261,41 @@ def test_unparseable_value_names_source() -> None:
     with pytest.raises(ConfigError, match="vision_lane") as exc_flag:
         load_cfg(flags={"vision_lane": "fable"})
     assert "flag" in str(exc_flag.value)
+
+
+def test_empty_env_overrides_lower_layer(tmp_path: Path) -> None:
+    toml_path = tmp_path / "cfg.toml"
+    toml_path.write_text('out = "/tmp/from-toml"\nframes_per_call = 4\n')
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("FRAMEWEAVE_OUT=\n")
+    assert load_cfg(toml_path=toml_path).out == Path("/tmp/from-toml")
+    assert load_cfg(env={"FRAMEWEAVE_OUT": ""}, toml_path=toml_path).out is None
+    assert load_cfg(toml_path=toml_path, dotenv_paths=[dotenv]).out is None
+    with pytest.raises(ConfigError, match="frames_per_call") as exc:
+        load_cfg(env={"FRAMEWEAVE_FRAMES_PER_CALL": ""}, toml_path=toml_path)
+    assert "env" in str(exc.value)
+    dotenv_required = tmp_path / "required.env"
+    dotenv_required.write_text("FRAMEWEAVE_FRAMES_PER_CALL=\n")
+    with pytest.raises(ConfigError, match="frames_per_call") as dotenv_exc:
+        load_cfg(toml_path=toml_path, dotenv_paths=[dotenv_required])
+    assert "env" in str(dotenv_exc.value)
+
+
+def test_native_toml_time_must_be_finite_nonnegative(tmp_path: Path) -> None:
+    path = tmp_path / "cfg.toml"
+    for raw in ("timeout_s = -1\n", "timeout_s = nan\n", "timeout_s = inf\n"):
+        path.write_text(raw)
+        with pytest.raises(ConfigError, match="timeout_s") as exc:
+            load_cfg(toml_path=path)
+        assert "toml" in str(exc.value)
+
+
+def test_toml_path_rejects_number(tmp_path: Path) -> None:
+    path = tmp_path / "cfg.toml"
+    path.write_text("out = 123\n")
+    with pytest.raises(ConfigError, match="out") as exc:
+        load_cfg(toml_path=path)
+    assert "toml" in str(exc.value)
 
 
 def test_extra_frameweave_env_is_ignored() -> None:
@@ -305,47 +346,56 @@ def test_output_dir_out_override(tmp_path: Path) -> None:
 
 
 def test_run_key_identical_inputs_match() -> None:
-    key = run_key(load_cfg(), "full")
-    assert run_key(load_cfg(), "full") == key
+    key = run_key(resolved(), "full")
+    assert run_key(resolved(), "full") == key
     assert len(key) == 12
     assert all(char in "0123456789abcdef" for char in key)
 
 
+def test_run_key_rejects_auto_lane() -> None:
+    with pytest.raises(ConfigError) as exc:
+        run_key(load_cfg(), "full")
+    assert str(exc.value) == AUTO_LANE_MSG
+
+
+def test_run_key_codex_model_changes_key() -> None:
+    base = run_key(resolved(), "full")
+    changed = run_key(resolved({"vision_model": {"codex": "gpt-5.6-luna"}}), "full")
+    assert changed != base
+
+
 def test_run_key_changes_with_listed_fields(tmp_path: Path) -> None:
-    base = run_key(load_cfg(), "full")
+    base = run_key(resolved(), "full")
     glossary_a = tmp_path / "a.txt"
     glossary_b = tmp_path / "b.txt"
     glossary_a.write_text("one")
     glossary_b.write_text("two")
-    assert run_key(load_cfg(flags={"vision_lane": "codex"}), "full") != base
-    assert run_key(
-        load_cfg(flags={"vision_lane": "codex", "vision_model": {"codex": "gpt-5.6-luna"}}),
-        "full",
-    ) != run_key(load_cfg(flags={"vision_lane": "codex"}), "full")
-    assert run_key(load_cfg(flags={"vision_quality": "high"}), "full") != base
-    assert run_key(load_cfg(flags={"frames_per_call": 4}), "full") != base
-    assert run_key(load_cfg(flags={"frame_interval_s": 15.0}), "full") != base
-    assert run_key(load_cfg(flags={"frame_width": 640}), "full") != base
-    assert run_key(load_cfg(flags={"max_frames": 40}), "full") != base
-    assert run_key(load_cfg(flags={"stt_backend": "hosted"}), "full") != base
-    assert run_key(load_cfg(flags={"stt_model": "large-v3"}), "full") != base
-    assert run_key(load_cfg(flags={"speakers": True}), "full") != base
-    assert run_key(load_cfg(flags={"prompt_revision": "2"}), "full") != base
-    assert run_key(load_cfg(flags={"glossary": glossary_a}), "full") != base
-    assert run_key(load_cfg(flags={"glossary": glossary_a}), "full") != run_key(
-        load_cfg(flags={"glossary": glossary_b}), "full"
+    assert run_key(resolved({"vision_lane": "claude"}), "full") != base
+    assert run_key(resolved({"vision_model": {"codex": "gpt-5.6-luna"}}), "full") != base
+    assert run_key(resolved({"vision_quality": "high"}), "full") != base
+    assert run_key(resolved({"frames_per_call": 4}), "full") != base
+    assert run_key(resolved({"frame_interval_s": 15.0}), "full") != base
+    assert run_key(resolved({"frame_width": 640}), "full") != base
+    assert run_key(resolved({"max_frames": 40}), "full") != base
+    assert run_key(resolved({"stt_backend": "hosted"}), "full") != base
+    assert run_key(resolved({"stt_model": "large-v3"}), "full") != base
+    assert run_key(resolved({"speakers": True}), "full") != base
+    assert run_key(resolved({"prompt_revision": "2"}), "full") != base
+    assert run_key(resolved({"glossary": glossary_a}), "full") != base
+    assert run_key(resolved({"glossary": glossary_a}), "full") != run_key(
+        resolved({"glossary": glossary_b}), "full"
     )
-    assert run_key(load_cfg(), "0:00-1:00") != base
+    assert run_key(resolved(), "0:00-1:00") != base
 
 
 def test_run_key_ignores_non_artifact_fields(tmp_path: Path) -> None:
-    base = run_key(load_cfg(), "full")
-    assert run_key(load_cfg(flags={"timeout_s": 30.0}), "full") == base
-    assert run_key(load_cfg(flags={"concurrency": 8}), "full") == base
-    assert run_key(load_cfg(flags={"out": tmp_path}), "full") == base
-    assert run_key(load_cfg(flags={"cache_dir": tmp_path / "c"}), "full") == base
-    assert run_key(load_cfg(flags={"lane_skip_percent": 50}), "full") == base
-    assert run_key(load_cfg(flags={"disk_warn_gb": 1}), "full") == base
+    base = run_key(resolved(), "full")
+    assert run_key(resolved({"timeout_s": 30.0}), "full") == base
+    assert run_key(resolved({"concurrency": 8}), "full") == base
+    assert run_key(resolved({"out": tmp_path}), "full") == base
+    assert run_key(resolved({"cache_dir": tmp_path / "c"}), "full") == base
+    assert run_key(resolved({"lane_skip_percent": 50}), "full") == base
+    assert run_key(resolved({"disk_warn_gb": 1}), "full") == base
 
 
 def test_cli_flags() -> None:

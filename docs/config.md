@@ -10,7 +10,7 @@ Highest first: CLI flag values (a dict; `None` means not given), `FRAMEWEAVE_<FI
 
 `FRAMEWEAVE_OUT is not set. Add this line to .env (or export it): FRAMEWEAVE_OUT=/path/to/output/folder`
 
-Time-valued strings (`timeout_s`, `frame_interval_s`) parse through `util.timecode`. Bools from strings: `1`/`0`/`true`/`false`/`yes`/`no`, case-insensitive. Paths expand `~`. `vision_model` comes from a `[vision_model]` table or `FRAMEWEAVE_VISION_MODEL_CODEX` and friends. An unknown toml key or an unparseable value raises `ConfigError` naming the key and the source (`env`, `toml`, `flag`).
+Time-valued strings (`timeout_s`, `frame_interval_s`) parse through `util.timecode`; native numbers must be finite and non-negative. Bools from strings: `1`/`0`/`true`/`false`/`yes`/`no`, case-insensitive. Paths are strings or `os.PathLike` (not numbers) and expand `~`. An empty `FRAMEWEAVE_*` value still counts as given: optional fields become `None`, required fields raise. `vision_model` comes from a `[vision_model]` table or `FRAMEWEAVE_VISION_MODEL_CODEX` and friends. An unknown toml key or an unparseable value raises `ConfigError` naming the key and the source (`env`, `toml`, `flag`).
 
 `.env.example` also lists `FRAMEWEAVE_SCRUB_TERMS` and `FRAMEWEAVE_KICKOFF_DIR`. Those are not `Config` fields.
 
@@ -49,7 +49,7 @@ Time-valued strings (`timeout_s`, `frame_interval_s`) parse through `util.timeco
 
 ## Run key
 
-`run_key(config, range_spec)` is the first 12 hex characters of SHA-256 over canonical JSON (sorted keys) of: `vision_lane`, `vision_model` (the entry for the effective lane only), `vision_quality`, `frames_per_call`, `frame_interval_s`, `frame_width`, `max_frames`, `stt_backend`, `stt_model`, `speakers`, `prompt_revision`, `glossary` (SHA-256 of file contents, else null), plus the range spec. Changing any of those changes the key. `timeout_s`, `concurrency`, `out`, `cache_dir`, `lane_skip_percent`, and `disk_warn_gb` do not.
+`run_key(config, range_spec)` is the first 12 hex characters of SHA-256 over canonical JSON (sorted keys) of: `vision_lane`, `vision_model` (the entry for the effective lane only), `vision_quality`, `frames_per_call`, `frame_interval_s`, `frame_width`, `max_frames`, `stt_backend`, `stt_model`, `speakers`, `prompt_revision`, `glossary` (SHA-256 of file contents, else null), plus the range spec. `vision_lane` must already be resolved; `auto` raises `ConfigError`. Changing any listed field changes the key. `timeout_s`, `concurrency`, `out`, `cache_dir`, `lane_skip_percent`, and `disk_warn_gb` do not.
 
 ## Seams
 
