@@ -15,13 +15,22 @@ import shutil
 import sys
 import traceback
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, TextIO
 
 from frameweave.config import Config, ConfigError, FlagSpec, load, require_out
+from frameweave.config import run_key as make_run_key
 from frameweave.frames import plan as plan_frames
 from frameweave.ledger import RATES
-from frameweave.preflight import MODULES, as_json, exit_code, run_doctor
+from frameweave.preflight import (
+    MODULES,
+    _dir_size,
+    _existing_ancestor,
+    as_json,
+    exit_code,
+    run_doctor,
+)
 from frameweave.sources.http import HttpSource
 from frameweave.sources.local import LocalFileSource
 from frameweave.sources.youtube import SourceBusy, YouTubeSource
@@ -38,26 +47,8 @@ _SPIKE_TOKENS_PER_CALL = (3997, 2034)
 _OUTPUT_TOKENS_PER_FRAME = 120
 _GB = 1024**3
 _SUBSCRIPTION_LANES = frozenset({"claude", "codex"})
-_CONFIG_FLAG_KEYS = frozenset(
-    {
-        "out",
-        "cache_dir",
-        "vision_lane",
-        "vision_quality",
-        "frames_per_call",
-        "frame_interval_s",
-        "frame_width",
-        "max_frames",
-        "speakers",
-        "timeout_s",
-        "glossary",
-        "captions_mode",
-        "stt_backend",
-        "stt_model",
-        "stt_device",
-        "vision_effort",
-    }
-)
+# Dest names that are CLI/pipeline control, not Config fields.
+_CLI_ONLY_DESTS = frozenset({"debug", "dry_run", "doctor_json", "redo", "frames_only", "out"})
 
 
 def cli_flags() -> list[FlagSpec]:
@@ -96,8 +87,11 @@ def main(
     try:
         args = parser.parse_args(args_list)
     except SystemExit as exc:
+        # Usage errors must not collide with exit 2 (incomplete speech).
         code = exc.code
-        return int(code) if isinstance(code, int) else (0 if code is None else 1)
+        if code is None or code == 0:
+            return 0
+        return 1
 
     load_kwargs: dict[str, Any] = {}
     if env is not None:
@@ -120,7 +114,7 @@ def main(
         return _handle_error(exc, getattr(args, "debug", False), err)
 
     parser.print_help(err)
-    return 2
+    return 1
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -143,18 +137,19 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Print doctor rows as JSON.",
     )
-    doctor.add_argument("--debug", action="store_true", default=False)
+    # SUPPRESS so a global --debug before the subcommand is not overwritten.
+    doctor.add_argument("--debug", action="store_true", default=argparse.SUPPRESS)
 
     inspect = sub.add_parser("inspect", help="Resolve input and print the pre-spend estimate.")
     inspect.add_argument("input", help="YouTube URL, media URL, or local file.")
-    inspect.add_argument("--quiet", action="store_true", default=False)
-    inspect.add_argument("--debug", action="store_true", default=False)
+    inspect.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS)
+    inspect.add_argument("--debug", action="store_true", default=argparse.SUPPRESS)
     _attach_flags(inspect, include_dry_run=False)
 
     run = sub.add_parser("run", help="Run the pipeline and write the output folder.")
     run.add_argument("input", help="YouTube URL, media URL, or local file.")
-    run.add_argument("--quiet", action="store_true", default=False)
-    run.add_argument("--debug", action="store_true", default=False)
+    run.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS)
+    run.add_argument("--debug", action="store_true", default=argparse.SUPPRESS)
     _attach_flags(run, include_dry_run=True)
 
     cache = sub.add_parser("cache", help="Cache utilities.")
@@ -217,25 +212,32 @@ def _add_flag(parser: argparse.ArgumentParser, spec: FlagSpec) -> None:
 
 
 def _flags_dict(args: argparse.Namespace) -> dict[str, Any]:
+    """Pass every collected dest except CLI-only; ``config.load`` rejects unknowns."""
     flags: dict[str, Any] = {}
     for spec in _collect_flags():
-        if spec.dest in {"debug", "dry_run", "doctor_json", "redo", "frames_only"}:
-            continue
-        if spec.dest not in _CONFIG_FLAG_KEYS:
+        if spec.dest in _CLI_ONLY_DESTS:
             continue
         flags[spec.dest] = getattr(args, spec.dest, None)
     return flags
 
 
+def _process_env(load_kwargs: dict[str, Any]) -> Mapping[str, str]:
+    # Honour an injected empty mapping; only fall back when env was not passed.
+    if "env" in load_kwargs:
+        return load_kwargs["env"]
+    return os.environ
+
+
 def _cmd_doctor(args: argparse.Namespace, load_kwargs: dict[str, Any], out: TextIO) -> int:
     config = load(flags={}, **load_kwargs)
+    process_env = _process_env(load_kwargs)
     if getattr(args, "doctor_json", False):
         from frameweave.preflight import collect
 
-        rows = collect(config, env=load_kwargs.get("env") or os.environ)
+        rows = collect(config, env=process_env)
         print(as_json(rows), file=out)
         return exit_code(rows)
-    return run_doctor(config, env=load_kwargs.get("env") or os.environ, out=out)
+    return run_doctor(config, env=process_env, out=out)
 
 
 def _cmd_inspect(
@@ -266,7 +268,12 @@ def _cmd_run(
 
     config = load(flags=_flags_dict(args), **load_kwargs)
     _warn_low_disk(config, out)
-    require_out(config)
+
+    out_override = getattr(args, "out", None)
+    if out_override is not None:
+        out_override = Path(out_override)
+    else:
+        require_out(config)
 
     source = _pick_source(args.input, backends)
     resolved = source.resolve(args.input)
@@ -307,6 +314,8 @@ def _cmd_run(
             source=source,
             stt=backends.get("stt") if backends else None,
             vision=backends.get("vision") if backends else None,
+            out_override=out_override,
+            resolved=resolved,
         )
     except Exception as exc:
         return _handle_error(exc, bool(getattr(args, "debug", False)), err)
@@ -325,7 +334,7 @@ def _cmd_run(
 def _cmd_cache(args: argparse.Namespace, load_kwargs: dict[str, Any], out: TextIO) -> int:
     if getattr(args, "cache_command", None) != "size":
         print("frameweave cache: only 'size' is available; prune is issue #23", file=out)
-        return 2
+        return 1
     config = load(flags={}, **load_kwargs)
     size = _dir_size(config.cache_dir)
     print(f"cache: {_format_bytes(size)} ({config.cache_dir})", file=out)
@@ -386,6 +395,8 @@ def _print_estimate(resolved: Resolved, config: Config, out: TextIO) -> None:
     print(f"vision lane: {lane}", file=out)
     print(f"tokens (est): {tokens} ({calls} calls, {frames} frames)", file=out)
     # TODO(#26): per-lane projection table (tokens, quota windows, dollars).
+    if lane == "none":
+        return
     if lane == "gemini":
         model = config.vision_model.get("gemini", "gemini-3.5-flash-lite")
         rate_in, rate_out = RATES.get(model, RATES.get("gemini-3.5-flash-lite", (0.30, 2.50)))
@@ -397,14 +408,17 @@ def _print_estimate(resolved: Resolved, config: Config, out: TextIO) -> None:
 
 
 def _print_frames_line(config: Config, video_id: str, out: TextIO) -> None:
-    root = Path(config.cache_dir) / "runs" / video_id
-    if not root.is_dir():
+    # Match the pipeline's run key (auto → claude until #26).
+    keyed = config if config.vision_lane != "auto" else replace(config, vision_lane="claude")
+    try:
+        key = make_run_key(keyed, "full")
+    except ConfigError:
         return
-    candidates = sorted(root.rglob("frames.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not candidates:
+    path = Path(config.cache_dir) / "runs" / video_id / key / "frames.json"
+    if not path.is_file():
         return
     try:
-        data = json.loads(candidates[0].read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return
     frames = data.get("frames") or []
@@ -435,28 +449,6 @@ def _warn_low_disk(config: Config, out: TextIO) -> None:
         f"(cache {cache_gb:.2f} GB); frameweave cache prune",
         file=out,
     )
-
-
-def _existing_ancestor(path: Path) -> Path:
-    probe = path
-    while not probe.exists():
-        if probe.parent == probe:
-            return probe
-        probe = probe.parent
-    return probe
-
-
-def _dir_size(path: Path) -> int:
-    if not path.is_dir():
-        return 0
-    total = 0
-    for root, _dirs, files in os.walk(path):
-        for name in files:
-            try:
-                total += (Path(root) / name).stat().st_size
-            except OSError:
-                continue
-    return total
 
 
 def _format_bytes(size: int) -> str:

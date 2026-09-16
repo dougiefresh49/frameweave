@@ -24,4 +24,4 @@ def test_no_command_exits_nonzero() -> None:
         text=True,
         check=False,
     )
-    assert result.returncode != 0
+    assert result.returncode == 1
