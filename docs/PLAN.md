@@ -351,3 +351,7 @@ Doug answered Q7-Q11, Q13, Q14, Q19-Q21 (decisions 31-41). Applied: `--vision no
 ### Owner note, applied 2026-09-16 after interview round three
 
 Doug answered Q22, Q23, Q15, Q16 (decisions 42-46). The duration-scaled frame budget is accepted. The speaker fixture, the real silent-audio case, and the M1 acceptance local-file run all come from his kickoff recording folder, which never enters git. The whole-video pass stays parked; the old fork is archived after M1. The working directory was renamed `~/projects/frameweave` and the docs were checked clean. No open questions remain; item 1 starts on his go.
+
+### Spike outcome, applied 2026-09-16 (item 21, decisions 47-49)
+
+The bake-off ran on the spike branch with 20 hand-labeled frames. Claude Code on sonnet with a trimmed context is the default vision lane (98.7% recall, 99.4% at batch 8, about 2.6k tokens per frame at batch 8); gemini-3.5-flash-lite is the metered fallback (96.8%, about $0.0013 per frame). No codex model or effort reached the 95% floor (70% to 86%): they omit strings rather than misread them, and GPT-6 Astra burned 28 points of the 5-hour window on 20 frames. Item 26's chooser therefore weighs the Claude lane against metered Gemini, with codex behind an explicit flag and a warning. Local STT measured 3.4x realtime for WhisperX on CPU and 9.4x for mlx-whisper (item 24 stays M2 because it lacks per-word scores). Section 4's provider table, item 11's model list, and item 26's lane set read with these rows.
