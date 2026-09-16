@@ -2,6 +2,14 @@
 
 Atomic publish: each artifact is written to a temp name in ``dest_dir`` and renamed
 into place. Paths cited in the transcript and ``meta.json`` are relative to ``dest_dir``.
+
+Call order for completion: callers that need ``incomplete`` (speech requested, zero
+segments) set ``meta.completion`` / ``meta.completion_reason`` via
+``derive_completion`` before ``write_transcript``. This function appends any
+missing-description warnings, assigns missing ``Segment.id`` values, then calls
+``derive_completion`` again so those warnings are reflected without clobbering an
+already-recorded incomplete run (``speech_requested`` is inferred from a prior
+``incomplete`` status).
 """
 
 from __future__ import annotations
@@ -9,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -103,16 +111,22 @@ def write_transcript(
     in time order. ``extra_headers`` are appended after the documented header keys.
     A frame with no description renders summary ``(no description)``, an empty
     ``text:`` line, and appends a warning on ``meta``.
+
+    Assigns missing ``Segment.id`` values as ``s<dddd>`` in list order (mutates the
+    caller's list). See module docstring for completion call order.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
+    _assign_segment_ids(segments)
     by_id = {d.frame_id: d for d in descriptions}
     for frame in frames:
         if frame.id not in by_id:
             warning = f"frame {frame.id} has no description"
             if warning not in meta.warnings:
                 meta.warnings.append(warning)
-            if meta.completion == "complete":
-                meta.completion = "complete-with-warnings"
+    speech_requested = meta.completion == "incomplete"
+    meta.completion, meta.completion_reason = derive_completion(
+        segments, meta.warnings, speech_requested
+    )
 
     header = _header_lines(resolved, frames, meta, extra_headers or {})
     body = _body_lines(
@@ -153,9 +167,8 @@ def write_meta(
                 "primary": primary,
                 "extra": extra,
                 "width": meta.frame_width,
-                "files": [
-                    _relative_path(f.path or _default_frame_path(f), dest_dir) for f in frames
-                ],
+                # assumed: relocation helpers want an explicit file list; not in format.md
+                "files": [_relative_path(f.path, dest_dir) for f in frames],
             },
             "completion": meta.completion,
             "completion_reason": meta.completion_reason,
@@ -187,6 +200,13 @@ def write_cost(dest_dir: Path, ledger_summary: dict) -> Path:
     path = dest_dir / "cost.json"
     _atomic_write(path, json.dumps(ledger_summary, indent=2, ensure_ascii=False) + "\n")
     return path
+
+
+def _assign_segment_ids(segments: list[Segment]) -> None:
+    """Fill missing ``Segment.id`` as ``s<dddd>`` in file order; leave existing ids."""
+    for index, seg in enumerate(segments, start=1):
+        if seg.id is None:
+            segments[index - 1] = replace(seg, id=f"s{index:04d}")
 
 
 def _header_lines(
@@ -278,11 +298,18 @@ def _body_lines(
     return out
 
 
+def _collapse_ws(text: str) -> str:
+    """Collapse any whitespace (including newlines) to a single space."""
+    return " ".join(text.split())
+
+
 def _said_line(seg: Segment) -> str:
-    payload = seg.text
+    text = _collapse_ws(seg.text)
+    payload = text
     if seg.speaker:
-        label = seg.speaker if seg.speaker.startswith("S") else f"S{seg.speaker}"
-        payload = f"{label}: {seg.text}"
+        # Digit labels only: speakers stage owns numbering; "S1" / "SPEAKER_00" pass through.
+        label = f"S{seg.speaker}" if seg.speaker.isdigit() else seg.speaker
+        payload = f"{label}: {text}"
     return f"[{_clock(seg.start)}-{_clock(seg.end)}] said/{seg.source}: {payload}"
 
 
@@ -294,14 +321,14 @@ def _seen_lines(
 ) -> list[str]:
     kind = "seen" if frame.kind == "primary" else "seen+"
     tag = desc.source if desc is not None else fallback_tag
-    rel = _relative_path(frame.path or _default_frame_path(frame), dest_dir)
+    rel = _relative_path(frame.path, dest_dir)
     if desc is None:
         summary = MISSING_DESCRIPTION
         text_line = "  text:"
     else:
-        summary = desc.summary
+        summary = _collapse_ws(desc.summary)
         if desc.strings:
-            quoted = ", ".join(f'"{s}"' for s in desc.strings)
+            quoted = ", ".join(f'"{_collapse_ws(s)}"' for s in desc.strings)
             text_line = f"  text: {quoted}"
         elif desc.illegible:
             text_line = "  text: illegible"
@@ -316,7 +343,7 @@ def _seen_lines(
 def _extra_event_key(line: str) -> tuple[float, str]:
     match = _EVENT_HEAD.match(line)
     if not match:
-        return 0.0, ""
+        raise ValueError(f"unparseable extra_events line: {line!r}")
     return parse_time(match.group("time")), match.group("kind")
 
 
@@ -331,18 +358,15 @@ def _vision_tag(vision: str) -> str:
     return vision.split()[0] if vision else "none"
 
 
-def _default_frame_path(frame: Frame) -> str:
-    stamped = format_time(frame.time, tenths=True).replace(":", "-")
-    return f"frames/{frame.id}-{stamped}.jpg"
-
-
 def _relative_path(path: str, dest_dir: Path) -> str:
     raw = Path(path)
     if raw.is_absolute():
         try:
             return raw.resolve().relative_to(dest_dir.resolve()).as_posix()
-        except ValueError:
-            return raw.as_posix()
+        except ValueError as exc:
+            raise ValueError(
+                f"frame path {path!r} is outside dest_dir {dest_dir.resolve().as_posix()}"
+            ) from exc
     return raw.as_posix()
 
 

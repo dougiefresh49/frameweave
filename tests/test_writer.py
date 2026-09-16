@@ -370,3 +370,99 @@ def test_write_cost_serializes_the_ledger_dict(tmp_path: Path) -> None:
 def test_cli_seams_are_empty() -> None:
     assert cli_flags() == []
     assert preflight_checks(object()) == []
+
+
+def test_newlines_in_text_collapsed_to_one_line(tmp_path: Path) -> None:
+    """Finding 1: auto-caption newlines must not break one-event-per-line."""
+    resolved = Resolved(video_id="v", title="t", channel="c", source="/v.mp4", duration=30.0)
+    segments = [Segment(0.0, 5.0, "hello\nworld\tand  spaces", "captions-auto")]
+    frames = [Frame("f0001", 5.0, "primary", "frames/f0001-00-00-05.0.jpg")]
+    descriptions = [
+        Description(
+            "f0001",
+            "claude:sonnet",
+            "A summary\nwith a break.",
+            ["line\none", "line\ntwo"],
+        ),
+    ]
+    text = write_transcript(
+        tmp_path, resolved, segments, frames, descriptions, _meta(),
+    ).read_text(encoding="utf-8")
+    body_lines = [ln for ln in text.splitlines() if ln.startswith("[") or ln.startswith("  text:")]
+    assert all("\n" not in ln for ln in body_lines)
+    assert "said/captions-auto: hello world and spaces" in text
+    assert "A summary with a break." in text
+    assert 'text: "line one", "line two"' in text
+
+
+def test_absolute_frame_path_outside_dest_raises(tmp_path: Path) -> None:
+    """Finding 2: paths outside dest_dir must raise, not emit absolute."""
+    resolved = Resolved(video_id="v", title="t", channel="c", source="/v.mp4", duration=10.0)
+    outside = tmp_path / "elsewhere" / "frame.jpg"
+    outside.parent.mkdir()
+    outside.write_bytes(b"jpeg")
+    frames = [Frame("f0001", 0.0, "primary", str(outside.resolve()))]
+    descriptions = [Description("f0001", "claude:sonnet", "Outside.")]
+    dest = tmp_path / "run"
+    dest.mkdir()
+    try:
+        write_transcript(dest, resolved, [], frames, descriptions, _meta())
+        raise AssertionError("expected ValueError for path outside dest_dir")
+    except ValueError as exc:
+        assert "outside dest_dir" in str(exc)
+
+
+def test_speaker_digit_label_only_gets_s_prefix(tmp_path: Path) -> None:
+    """Finding 3: SPEAKER_00 is not treated as already-formatted S*."""
+    resolved = Resolved(video_id="v", title="t", channel="c", source="/v.mp4", duration=30.0)
+    segments = [
+        Segment(0.0, 1.0, "digit", "stt", speaker="1"),
+        Segment(1.0, 2.0, "already", "stt", speaker="S2"),
+        Segment(2.0, 3.0, "raw", "stt", speaker="SPEAKER_00"),
+    ]
+    text = write_transcript(tmp_path, resolved, segments, [], [], _meta()).read_text(
+        encoding="utf-8"
+    )
+    assert "said/stt: S1: digit" in text
+    assert "said/stt: S2: already" in text
+    assert "said/stt: SPEAKER_00: raw" in text
+    assert "SSPEAKER_00" not in text
+
+
+def test_write_transcript_uses_derive_completion_for_warnings(tmp_path: Path) -> None:
+    """Finding 4: missing-description warnings go through derive_completion."""
+    resolved = Resolved(video_id="v", title="t", channel="c", source="/v.mp4", duration=10.0)
+    frames = [Frame("f0001", 0.0, "primary", "frames/f0001-00-00-00.0.jpg")]
+    meta = _meta(completion="complete", completion_reason=None, warnings=[])
+    write_transcript(tmp_path, resolved, [], frames, [], meta)
+    assert meta.completion == "complete-with-warnings"
+    assert meta.completion_reason is None
+    incomplete = _meta(completion="incomplete", completion_reason=INCOMPLETE_NO_SPEECH, warnings=[])
+    write_transcript(tmp_path, resolved, [], frames, [], incomplete)
+    assert incomplete.completion == "incomplete"
+    assert incomplete.completion_reason == INCOMPLETE_NO_SPEECH
+
+
+def test_unparseable_extra_event_raises(tmp_path: Path) -> None:
+    """Finding 5: unparseable extra_events must raise, not sort to 0.0."""
+    resolved = Resolved(video_id="v", title="t", channel="c", source="/v.mp4", duration=10.0)
+    try:
+        write_transcript(
+            tmp_path, resolved, [], [], [], _meta(),
+            extra_events=["not a timed event line"],
+        )
+        raise AssertionError("expected ValueError for unparseable extra_events")
+    except ValueError as exc:
+        assert "unparseable extra_events" in str(exc)
+
+
+def test_segment_ids_assigned_when_missing(tmp_path: Path) -> None:
+    """Lead add-on: missing Segment.id becomes s<dddd> in file order."""
+    resolved = Resolved(video_id="v", title="t", channel="c", source="/v.mp4", duration=10.0)
+    segments = [
+        Segment(0.0, 1.0, "a", "captions"),
+        Segment(1.0, 2.0, "b", "captions", id="s0099"),
+        Segment(2.0, 3.0, "c", "captions"),
+    ]
+    write_transcript(tmp_path, resolved, segments, [], [], _meta())
+    assert [s.id for s in segments] == ["s0001", "s0099", "s0003"]
