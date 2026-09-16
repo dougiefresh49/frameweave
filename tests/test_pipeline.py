@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -1115,3 +1116,127 @@ def test_explicit_lane_with_injected_backend_runs_without_real_cli(
     )
     assert outcome.completion == "complete"
     assert outcome.vision_lane == "claude"
+
+
+def test_lane_choice_survives_a_describe_cache_hit(tmp_path: Path) -> None:
+    """#71 defect 1: an assemble-only rerun still yields lane_choice even though
+    describe (the stage that computes it) is reused and never runs again."""
+    from datetime import UTC, datetime
+
+    snap_path = tmp_path / "usage-snapshot.json"
+    snap_path.write_text(
+        json.dumps(
+            {
+                "generatedAt": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "providers": {
+                    "claude": {
+                        "metrics": [
+                            {"id": "five_hour", "percentUsed": 10},
+                            {"id": "seven_day", "percentUsed": 20},
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    video = _video(tmp_path)
+    cfg = _cfg(
+        tmp_path,
+        vision_lane="auto",
+        usage_snapshot=snap_path,
+        usage_refresh_script=tmp_path / "missing-refresh.sh",
+    )
+    source = FakeSource(video=video)
+    stt = FakeStt()
+    vision = FakeVision()
+    outcome = run(str(video), cfg, source=source, stt=stt, vision=vision)
+    meta = json.loads((outcome.output_path / "meta.json").read_text(encoding="utf-8"))
+    assert "lane_choice" in meta
+
+    # Delete only the output folder so assemble's cache-hit check fails and it
+    # reruns, while frames/describe stay cached (same run key, same inputs).
+    shutil.rmtree(outcome.output_path)
+    vision_calls_before = vision.calls
+    outcome2 = run(str(video), cfg, source=source, stt=stt, vision=vision)
+    assert vision.calls == vision_calls_before, "describe should have been reused"
+
+    meta2 = json.loads((outcome2.output_path / "meta.json").read_text(encoding="utf-8"))
+    assert "lane_choice" in meta2
+    assert meta2["lane_choice"]["lane"] == "claude"
+
+
+def test_frames_only_completion_reaches_the_header_unchanged(tmp_path: Path) -> None:
+    """#71 defect 2: writer must not clobber the frames-only completion sentinel."""
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path)
+    outcome = run(
+        str(video),
+        cfg,
+        frames_only=True,
+        source=FakeSource(video=video),
+        stt=FakeStt(),
+        vision=FakeVision(),
+    )
+    assert outcome.completion == "complete (speech not requested)"
+    meta = json.loads((outcome.output_path / "meta.json").read_text(encoding="utf-8"))
+    assert meta["completion"] == "complete (speech not requested)"
+    header = (outcome.output_path / "transcript.fwv").read_text(encoding="utf-8")
+    assert "completion: complete (speech not requested)" in header
+
+
+def test_speaker_count_reaches_header_and_meta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#71 defect 3: two diarized speakers produce speakers=2 in header and meta,
+    and the README's Speakers section."""
+    from dataclasses import replace
+
+    from frameweave.stt.audio import Chunk
+    from frameweave.stt.base import SttResult
+    from frameweave.stt.local import WhisperXBackend
+    from frameweave.types import Usage
+
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path, speakers=True, vision_lane="none")
+
+    def fake_diarize(audio: Path, segments: list[Segment]) -> list[Segment]:
+        del audio
+        return [
+            replace(seg, speaker="S1" if seg.start < 8.0 else "S2") for seg in segments
+        ]
+
+    backend = WhisperXBackend(diarize=fake_diarize)
+    scripted = [
+        Segment(0.0, 4.0, "speaker one talking now", "stt-whisperx"),
+        Segment(4.0, 8.0, "still speaker one here.", "stt-whisperx"),
+        Segment(8.0, 12.0, "speaker two takes over", "stt-whisperx"),
+        Segment(12.0, 16.0, "and finishes the thought.", "stt-whisperx"),
+    ]
+
+    def fake_transcribe(self: WhisperXBackend, audio: Path, config: object) -> SttResult:
+        del self, config
+        return SttResult(
+            segments=list(scripted),
+            source="stt-whisperx",
+            usage=Usage(calls=1, seconds=0.01),
+            audio_seconds=20.0,
+        )
+
+    monkeypatch.setattr(WhisperXBackend, "transcribe", fake_transcribe)
+
+    def fake_chunk(audio: Path, dest_dir: Path, **kwargs: object) -> list[Chunk]:
+        del dest_dir, kwargs
+        return [Chunk(audio, offset_s=0.0, duration_s=20.0)]
+
+    monkeypatch.setattr("frameweave.pipeline.stt_audio.chunk", fake_chunk)
+
+    outcome = run(
+        str(video), cfg, source=FakeSource(video=video), stt=backend, vision=FakeVision()
+    )
+    meta = json.loads((outcome.output_path / "meta.json").read_text(encoding="utf-8"))
+    assert meta["speakers"] == 2
+    header = (outcome.output_path / "transcript.fwv").read_text(encoding="utf-8")
+    assert "speakers: 2" in header
+    readme = (outcome.output_path / "README.md").read_text(encoding="utf-8")
+    assert "## Speakers" in readme
