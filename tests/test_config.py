@@ -441,3 +441,16 @@ def test_env_example_loads_cleanly(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert cfg.out is not None
     assert cfg.frames_per_call == 8
     assert cfg.channels == {}
+
+
+def test_captions_mode_and_vision_effort_are_fields(tmp_path: Path) -> None:
+    cfg = load(
+        flags={"captions_mode": "manual"},
+        env={"FRAMEWEAVE_VISION_EFFORT": "medium"},
+        toml_path=tmp_path / "none.toml",
+        dotenv_paths=[],
+    )
+    assert cfg.captions_mode == "manual"
+    assert cfg.vision_effort == "medium"
+    base = load(flags={}, env={}, toml_path=tmp_path / "none.toml", dotenv_paths=[])
+    assert (base.captions_mode, base.vision_effort) == ("auto", "low")

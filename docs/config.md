@@ -38,6 +38,8 @@ Time-valued strings (`timeout_s`, `frame_interval_s`) parse through `util.timeco
 | disk_warn_gb | int | 10 | FRAMEWEAVE_DISK_WARN_GB | disk_warn_gb | Warn when free disk is under this many GB. |
 | prompt_revision | str | 1 | FRAMEWEAVE_PROMPT_REVISION | prompt_revision | Vision prompt revision. Part of the run key. |
 | channels | dict[str, str] | {} | FRAMEWEAVE_CHANNELS (JSON) | [channels] | Display name to folder slug overrides. |
+| captions_mode | str | auto | FRAMEWEAVE_CAPTIONS_MODE | captions_mode | auto, manual, or none (captions stage). |
+| vision_effort | str | low | FRAMEWEAVE_VISION_EFFORT | vision_effort | codex lane reasoning effort for frames. |
 
 ## Slugs and channel folders
 
