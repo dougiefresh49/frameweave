@@ -11,8 +11,8 @@ import pytest
 PIL = pytest.importorskip("PIL")  # the dedupe extras group; CI installs it, a bare env skips
 from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 
-from frameweave.config import load
-from frameweave.dedupe import (
+from frameweave.config import load  # noqa: E402
+from frameweave.dedupe import (  # noqa: E402
     DEFAULT_SIZE,
     DEFAULT_THRESHOLD,
     dhash,
@@ -20,7 +20,7 @@ from frameweave.dedupe import (
     pillow_available,
     suppress,
 )
-from frameweave.types import Frame
+from frameweave.types import Frame  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not pillow_available(), reason="pillow (dedupe extra) required")
 
