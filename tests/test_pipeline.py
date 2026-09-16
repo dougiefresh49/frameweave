@@ -685,6 +685,180 @@ def test_sigint_subprocess_reconciles_and_clears_temps(tmp_path: Path) -> None:
     assert (run_dir / "deleted-int-1").is_file()
 
 
+@pytest.mark.parametrize(
+    ("sig", "expected_code"),
+    [
+        ("SIGINT", 130),
+        ("SIGTERM", 143),
+    ],
+)
+def test_signal_during_describe_stops_within_one_batch(
+    tmp_path: Path, sig: str, expected_code: int
+) -> None:
+    """SIGINT/SIGTERM mid-describe: exit 130/143, no temps, next run resumes.
+
+    Before the #68 fix, SIGINT during describe re-delivered via os.kill and the
+    worker exited -2 (signal death) rather than 130 through the CLI; a vision
+    child killed by the same signal could also be swallowed as a retryable
+    failure so batches continued. Observed on main: exit -2, not 130.
+    """
+    import os
+    import signal
+    import time
+
+    video = _video(tmp_path)
+    out = tmp_path / "out"
+    cache = tmp_path / "cache"
+    out.mkdir()
+    cache.mkdir()
+    ready = tmp_path / "ready"
+    calls_path = tmp_path / "calls.txt"
+
+    code = textwrap.dedent(
+        f"""
+        import sys, time
+        from pathlib import Path
+        sys.path.insert(0, {str(Path.cwd() / "src")!r})
+        sys.path.insert(0, {str(Path.cwd())!r})
+
+        from frameweave.cli import main
+        from frameweave.types import Description, Usage
+        from tests.fakes.pipeline import FakeSource, FakeStt
+
+        ready = Path({str(ready)!r})
+        calls_path = Path({str(calls_path)!r})
+        video = Path({str(video)!r})
+        out = Path({str(out)!r})
+        cache = Path({str(cache)!r})
+
+        class SlowVision:
+            name = "fake-vision"
+            model = "fake-model"
+            calls = 0
+
+            def describe(self, batch, context, frames_dir, config):
+                self.calls += 1
+                calls_path.write_text(str(self.calls), encoding="utf-8")
+                # Leave a temp the handler must clear.
+                (frames_dir.parent / "describe.partial").write_bytes(b"x")
+                ready.write_text(str(self.calls), encoding="utf-8")
+                time.sleep(5)
+                return [
+                    Description(
+                        frame_id=frame.id,
+                        source="fake:fake",
+                        summary="s",
+                        strings=[],
+                    )
+                    for frame in batch
+                ], Usage(calls=1)
+
+        code = main(
+            [
+                "run",
+                str(video),
+                "--out",
+                str(out / "exact"),
+                "--vision",
+                "claude",
+                "--captions",
+                "none",
+                "--frames-per-call",
+                "2",
+                "--frame-interval",
+                "5",
+                "--quiet",
+            ],
+            backends={{
+                "source": FakeSource(video=video),
+                "stt": FakeStt(),
+                "vision": SlowVision(),
+            }},
+            env={{
+                "FRAMEWEAVE_OUT": str(out),
+                "FRAMEWEAVE_CACHE_DIR": str(cache),
+            }},
+            toml_path=Path("/nonexistent/frameweave-test/config.toml"),
+            dotenv_paths=[],
+        )
+        raise SystemExit(code)
+        """
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    stderr_text = ""
+    try:
+        for _ in range(400):
+            if ready.is_file() and ready.read_text(encoding="utf-8").strip() == "1":
+                break
+            if proc.poll() is not None:
+                out_t, err_t = proc.communicate()
+                raise AssertionError(
+                    f"worker exited early rc={proc.returncode}\n"
+                    f"stdout={out_t}\nstderr={err_t}"
+                )
+            time.sleep(0.05)
+        else:
+            proc.kill()
+            raise AssertionError("describe never started")
+
+        signum = getattr(signal, sig)
+        os.kill(proc.pid, signum)
+        try:
+            _, stderr_text = proc.communicate(timeout=8)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _, stderr_text = proc.communicate(timeout=5)
+            raise AssertionError(
+                f"worker did not exit within one batch after {sig}"
+            ) from None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    assert proc.returncode == expected_code, (
+        f"expected {expected_code}, got {proc.returncode}; stderr={stderr_text}"
+    )
+    assert calls_path.read_text(encoding="utf-8").strip() == "1"
+
+    run_dirs = list((cache / "runs").rglob("frames.json"))
+    assert run_dirs, "expected a run dir with frames.json from earlier stages"
+    run_dir = run_dirs[0].parent
+    leftovers = [
+        p
+        for p in run_dir.rglob("*")
+        if p.is_file()
+        and (
+            p.name.endswith(".partial")
+            or p.name.endswith(".tmp")
+            or p.name.endswith(".tmp.jpg")
+            or ".tmp." in p.name
+        )
+    ]
+    assert leftovers == []
+
+    # Following run reuses resolve/fetch/transcript/frames; only describe (+assemble).
+    cfg = _cfg(
+        tmp_path,
+        out=out,
+        cache_dir=cache,
+        frames_per_call=2,
+        frame_interval_s=5.0,
+    )
+    source = FakeSource(video=video)
+    stt = FakeStt()
+    vision = FakeVision()
+    run(str(video), cfg, source=source, stt=stt, vision=vision)
+    assert source.fetch_calls == 0
+    assert stt.calls == 0
+    assert vision.calls >= 1
+
+
 def test_stage_registry_order() -> None:
     assert [s.name for s in STAGES] == [
         "resolve",

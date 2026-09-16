@@ -92,6 +92,15 @@ def _progress_noop(_msg: str) -> None:
 _ACTIVE: dict[str, Any] = {}
 
 
+class RunInterrupted(KeyboardInterrupt):
+    """SIGINT or SIGTERM during a run. ``exit_code`` is 130 or 143."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__()
+        self.signum = signum
+        self.exit_code = 128 + signum
+
+
 @dataclass(frozen=True)
 class Stage:
     name: str
@@ -880,6 +889,8 @@ def _stage_describe(ctx: RunContext) -> StageResult:
     total_usage = Usage()
 
     for start in range(0, len(frames), batch_size):
+        if _ACTIVE.get("interrupted"):
+            raise RunInterrupted(int(_ACTIVE.get("signum", signal.SIGINT)))
         batch = frames[start : start + batch_size]
         context = _transcript_window(segments, batch)
         started = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -1256,6 +1267,8 @@ def _creatable_writable(path: Path) -> tuple[bool, str]:
 
 def _install_handlers(ctx: RunContext) -> None:
     _ACTIVE["ctx"] = ctx
+    _ACTIVE.pop("interrupted", None)
+    _ACTIVE.pop("signum", None)
     previous = {
         signal.SIGINT: signal.getsignal(signal.SIGINT),
         signal.SIGTERM: signal.getsignal(signal.SIGTERM),
@@ -1263,9 +1276,12 @@ def _install_handlers(ctx: RunContext) -> None:
     _ACTIVE["previous"] = previous
 
     def _handler(signum: int, _frame: object) -> None:
+        _ACTIVE["interrupted"] = True
+        _ACTIVE["signum"] = signum
         _cleanup_on_signal(ctx)
-        signal.signal(signum, previous.get(signum, signal.SIG_DFL))
-        os.kill(os.getpid(), signum)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        raise RunInterrupted(signum)
 
     signal.signal(signal.SIGINT, _handler)
     signal.signal(signal.SIGTERM, _handler)
@@ -1274,6 +1290,8 @@ def _install_handlers(ctx: RunContext) -> None:
 def _clear_handlers() -> None:
     previous = _ACTIVE.pop("previous", None)
     _ACTIVE.pop("ctx", None)
+    # Keep interrupted/signum so a deferred check after finally still sees them;
+    # the next run's _install_handlers clears them.
     if previous:
         for sig, handler in previous.items():
             signal.signal(sig, handler)

@@ -253,6 +253,58 @@ def test_non_quota_nonzero_exit_does_not_retry(tmp_path: Path) -> None:
     assert len(runner.calls) == 1
 
 
+@pytest.mark.parametrize("returncode", [-2, 130])
+def test_sigint_child_exit_raises_keyboard_interrupt_no_retry(
+    returncode: int, tmp_path: Path
+) -> None:
+    """A vision child killed by SIGINT must not be classified retryable."""
+    envelope = (RECORDED / "claude-normal.json").read_text()
+    runner = ScriptedRunner(
+        [
+            completed(returncode=returncode),
+            completed(stdout=envelope),
+        ]
+    )
+    backend = CliBackend("claude", "sonnet", runner=runner, sleep=lambda _: None)
+
+    with pytest.raises(KeyboardInterrupt):
+        backend.describe(frames(1), "", tmp_path, config())
+
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.parametrize("returncode", [-15, 143])
+def test_sigterm_child_exit_raises_system_exit_143_no_retry(
+    returncode: int, tmp_path: Path
+) -> None:
+    envelope = (RECORDED / "claude-normal.json").read_text()
+    runner = ScriptedRunner(
+        [
+            completed(returncode=returncode),
+            completed(stdout=envelope),
+        ]
+    )
+    backend = CliBackend("claude", "sonnet", runner=runner, sleep=lambda _: None)
+
+    with pytest.raises(SystemExit) as exc_info:
+        backend.describe(frames(1), "", tmp_path, config())
+
+    assert exc_info.value.code == 143
+    assert len(runner.calls) == 1
+
+
+def test_keyboard_interrupt_not_classified_retryable(tmp_path: Path) -> None:
+    """KeyboardInterrupt raised from the runner must propagate, not retry."""
+
+    def boom(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise KeyboardInterrupt
+
+    backend = CliBackend("claude", "sonnet", runner=boom, sleep=lambda _: None)
+
+    with pytest.raises(KeyboardInterrupt):
+        backend.describe(frames(1), "", tmp_path, config())
+
+
 def test_codex_refuses_empty_model() -> None:
     with pytest.raises(ValueError, match="explicit model"):
         CliBackend("codex", "")
