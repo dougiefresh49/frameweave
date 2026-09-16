@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import tempfile
@@ -35,10 +34,10 @@ if TYPE_CHECKING:
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Lane = Literal["claude", "codex"]
 
-_MCP_FILE = ".frameweave-empty-mcp.json"
 _QUOTA = re.compile(r"rate[ -]?limit|quota|\b429\b|overloaded", re.IGNORECASE)
 _RETRY_AFTER = re.compile(r"retry-after\s*:?\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
 _TOKENS = re.compile(r"tokens used\s*\n\s*([\d,]+)", re.IGNORECASE)
+_mcp_config_path: Path | None = None
 
 
 class CliBackend:
@@ -77,10 +76,12 @@ class CliBackend:
         argv = self._argv(paths, prompt, frames_dir, config)
         bad_replies = 0
         calls = 0
+        spent = Usage()
+        last_detail = "request failed"
         started = self._clock()
 
         def invoke() -> tuple[subprocess.CompletedProcess[str], list[Description], Usage]:
-            nonlocal calls
+            nonlocal calls, spent
             calls += 1
             result = self._runner(
                 argv,
@@ -93,25 +94,33 @@ class CliBackend:
             )
             if result.returncode != 0:
                 return result, [], Usage()
-            parsed, usage = self._parse_success(result)
-            descriptions = validate(batch, parsed, source=f"{self.name}:{self.model}")
-            return result, descriptions, usage
+            reply_text, usage = self._extract_reply(result)
+            spent = spent + usage
+            descriptions = validate(
+                batch, parse_json_list(reply_text), source=f"{self.name}:{self.model}"
+            )
+            return result, descriptions, spent
 
         def classify(value: object) -> Outcome:
-            nonlocal bad_replies
+            nonlocal bad_replies, last_detail
             if isinstance(value, subprocess.TimeoutExpired):
+                last_detail = str(value) or "timed out"
                 return Outcome("timeout")
             if isinstance(value, BadReply):
+                last_detail = str(value) or "bad reply"
                 bad_replies += 1
                 return Outcome("retry" if bad_replies == 1 else "fail")
             if isinstance(value, Exception):
+                last_detail = str(value) or value.__class__.__name__
                 return Outcome("fail")
             result = value[0] if isinstance(value, tuple) else value
             if not isinstance(result, subprocess.CompletedProcess):
+                last_detail = "unexpected vision response"
                 return Outcome("fail")
             if result.returncode == 0:
                 return Outcome("ok")
             output = f"{result.stdout or ''}\n{result.stderr or ''}"
+            last_detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
             if _QUOTA.search(output):
                 retry_after = _retry_after(output)
                 return Outcome("retry", retry_after=retry_after)
@@ -127,8 +136,7 @@ class CliBackend:
                 frames_per_call=config.frames_per_call,
             )
         except (RequestFailed, RequestTimeout, RetryExhausted) as exc:
-            detail = str(exc.__cause__ or exc)
-            raise VisionFailed(failure_message(self.name, detail, config)) from exc
+            raise VisionFailed(failure_message(self.name, last_detail, config)) from exc
 
         elapsed = self._clock() - started
         return descriptions, Usage(
@@ -160,7 +168,7 @@ class CliBackend:
                 argv.extend(("-i", str(path)))
             return [*argv, "--", prompt]
 
-        mcp_config = _ensure_empty_mcp_config(frames_dir)
+        mcp_config = _ensure_empty_mcp_config()
         read_request = "Read these image file(s) with the Read tool, in order:\n"
         read_request += "\n".join(str(path) for path in paths)
         read_request += f"\n\nThen: {prompt}"
@@ -188,9 +196,10 @@ class CliBackend:
             read_request,
         ]
 
-    def _parse_success(
+    def _extract_reply(
         self, result: subprocess.CompletedProcess[str]
-    ) -> tuple[list[object], Usage]:
+    ) -> tuple[str, Usage]:
+        """Return reply text and usage; accumulate usage before JSON validation."""
         if self.name == "claude":
             try:
                 envelope = json.loads(result.stdout)
@@ -213,12 +222,12 @@ class CliBackend:
                 tokens_in=tokens_in,
                 tokens_out=_integer(provider_usage.get("output_tokens")),
             )
-            return parse_json_list(envelope["result"]), usage
+            return envelope["result"], usage
 
         output = f"{result.stderr or ''}\n{result.stdout or ''}"
         match = _TOKENS.search(output)
         tokens = int(match.group(1).replace(",", "")) if match else 0
-        return parse_json_list(result.stdout), Usage(tokens_in=tokens)
+        return result.stdout or "", Usage(tokens_in=tokens)
 
 
 def _frame_path(frame: Frame, frames_dir: Path) -> Path:
@@ -228,18 +237,22 @@ def _frame_path(frame: Frame, frames_dir: Path) -> Path:
     return (frames_dir / path.name).resolve()
 
 
-def _ensure_empty_mcp_config(frames_dir: Path) -> Path:
-    target = frames_dir.resolve() / _MCP_FILE
-    if target.exists():
-        return target
-    frames_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=frames_dir, prefix=f"{_MCP_FILE}.", delete=False
-    ) as handle:
+def _ensure_empty_mcp_config() -> Path:
+    """Write the empty MCP config once under a scratch temp dir (not the frames folder)."""
+    global _mcp_config_path
+    if _mcp_config_path is not None and _mcp_config_path.exists():
+        return _mcp_config_path
+    handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="frameweave-empty-mcp-",
+        suffix=".json",
+        delete=False,
+    )
+    with handle:
         handle.write('{"mcpServers": {}}\n')
-        temporary = Path(handle.name)
-    os.replace(temporary, target)
-    return target
+    _mcp_config_path = Path(handle.name)
+    return _mcp_config_path
 
 
 def _retry_after(output: str) -> float | None:

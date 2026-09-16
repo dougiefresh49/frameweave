@@ -73,26 +73,32 @@ class GeminiBackend:
         request_config = types.GenerateContentConfig(response_mime_type="application/json")
         bad_replies = 0
         calls = 0
+        spent = Usage()
+        last_detail = "request failed"
         started = self._clock()
 
         def invoke() -> tuple[list[Description], Usage]:
-            nonlocal calls
+            nonlocal calls, spent
             calls += 1
             response = client.models.generate_content(
                 model=self.model,
                 contents=[types.Content(role="user", parts=parts)],
                 config=request_config,
             )
+            usage = _usage(response, self.model)
+            spent = spent + usage
             parsed = parse_json_list(response.text or "")
             descriptions = validate(batch, parsed, source=f"{self.name}:{self.model}")
-            return descriptions, _usage(response, self.model)
+            return descriptions, spent
 
         def classify(value: object) -> Outcome:
-            nonlocal bad_replies
+            nonlocal bad_replies, last_detail
             if isinstance(value, BadReply):
+                last_detail = str(value) or "bad reply"
                 bad_replies += 1
                 return Outcome("retry" if bad_replies == 1 else "fail")
             if isinstance(value, Exception):
+                last_detail = str(value) or value.__class__.__name__
                 status = _status_code(value)
                 if status == 429 or status is not None and 500 <= status <= 599:
                     return Outcome("retry", retry_after=_exception_retry_after(value))
@@ -109,8 +115,7 @@ class GeminiBackend:
                 frames_per_call=config.frames_per_call,
             )
         except (RequestFailed, RequestTimeout, RetryExhausted) as exc:
-            detail = str(exc.__cause__ or exc)
-            raise VisionFailed(failure_message(self.name, detail, config)) from exc
+            raise VisionFailed(failure_message(self.name, last_detail, config)) from exc
 
         return descriptions, Usage(
             calls=calls,

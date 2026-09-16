@@ -135,18 +135,23 @@ def cli_flags() -> list[FlagSpec]:
 
     return [
         FlagSpec(
-            "--vision",
-            "vision_lane",
-            _choice("vision", ("auto", "claude", "codex", "gemini", "none")),
-            "Vision lane: auto, claude, codex, gemini, or none.",
+            name="--vision",
+            dest="vision_lane",
+            type=_choice("vision", ("auto", "claude", "codex", "gemini", "none")),
+            help="Vision lane: auto, claude, codex, gemini, or none.",
         ),
         FlagSpec(
-            "--vision-quality",
-            "vision_quality",
-            _choice("vision quality", ("standard", "high")),
-            "Vision detail: standard or high.",
+            name="--vision-quality",
+            dest="vision_quality",
+            type=_choice("vision quality", ("standard", "high")),
+            help="Vision detail: standard or high.",
         ),
-        FlagSpec("--frames-per-call", "frames_per_call", int, "Frames sent in one vision call."),
+        FlagSpec(
+            name="--frames-per-call",
+            dest="frames_per_call",
+            type=int,
+            help="Frames sent in one vision call.",
+        ),
     ]
 
 
@@ -161,10 +166,10 @@ def preflight_checks(config: Config) -> list[Check]:
     has_key = bool(os.environ.get("GEMINI_API_KEY"))
     checks.append(
         Check(
-            "GEMINI_API_KEY",
-            has_key,
-            "GEMINI_API_KEY is set" if has_key else "GEMINI_API_KEY is not set",
-            "Export GEMINI_API_KEY before using --vision gemini.",
+            name="GEMINI_API_KEY",
+            ok=has_key,
+            detail="GEMINI_API_KEY is set" if has_key else "GEMINI_API_KEY is not set",
+            remedy="Export GEMINI_API_KEY before using --vision gemini.",
             required=config.vision_lane == "gemini",
         )
     )
@@ -172,36 +177,52 @@ def preflight_checks(config: Config) -> list[Check]:
 
 
 def failure_message(lane: str, detail: str, config: Config) -> str:
-    """Turn every terminal provider failure into the same actionable message."""
-    return (
-        f"{lane} vision failed: {detail}\n"
-        f"--timeout <seconds> (raise the per-call timeout, currently {_number(config.timeout_s)})\n"
-        "--vision-quality low (send smaller frames)\n"
-        "--frames-per-call <n> (send fewer frames per request, currently "
-        f"{_number(config.frames_per_call)})"
+    """Turn every terminal provider failure into the same actionable message.
+
+    Reuses ``util.retry``'s three-line remedy block so the copy stays one place;
+    vision substitutes ``--vision-quality standard`` to match ``cli_flags``
+    (util still says ``low`` until issue #2 updates it).
+    """
+    from frameweave.util import retry as retry_mod
+
+    remedies = retry_mod._timeout_message(config.timeout_s, config.frames_per_call).replace(
+        "--vision-quality low", "--vision-quality standard"
     )
+    return f"{lane} vision failed: {detail}\n{remedies}"
 
 
 def _binary_check(name: str, required: bool, check_type: type[Check]) -> Check:
     path = shutil.which(name)
     remedy = f"Install {name} and ensure it is on PATH before using --vision {name}."
     if path is None:
-        return check_type(name, False, f"{name} is not on PATH", remedy, required=required)
+        return check_type(
+            name=name,
+            ok=False,
+            detail=f"{name} is not on PATH",
+            remedy=remedy,
+            required=required,
+        )
     try:
         result = subprocess.run(
             [path, "--version"], capture_output=True, text=True, timeout=10, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return check_type(
-            name,
-            False,
-            f"could not read {name} version: {exc}",
-            remedy,
+            name=name,
+            ok=False,
+            detail=f"could not read {name} version: {exc}",
+            remedy=remedy,
             required=required,
         )
     output = (result.stdout or result.stderr).strip().splitlines()
     detail = output[0] if output else f"{name} --version exited {result.returncode}"
-    return check_type(name, result.returncode == 0, detail, remedy, required=required)
+    return check_type(
+        name=name,
+        ok=result.returncode == 0,
+        detail=detail,
+        remedy=remedy,
+        required=required,
+    )
 
 
 def _choice(label: str, choices: tuple[str, ...]) -> Any:
@@ -216,7 +237,3 @@ def _choice(label: str, choices: tuple[str, ...]) -> Any:
 
 def _collapse_whitespace(value: str) -> str:
     return " ".join(value.split())
-
-
-def _number(value: float | int) -> str:
-    return str(int(value)) if int(value) == value else str(value)

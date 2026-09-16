@@ -90,10 +90,11 @@ def test_400_fails_without_retry(tmp_path: Path) -> None:
     client = FakeGenAIClient([FakeAPIError(400)])
     backend = GeminiBackend("gemini-3.5-flash-lite", client=client)
 
-    with pytest.raises(VisionFailed):
+    with pytest.raises(VisionFailed) as raised:
         backend.describe([frame(1)], "", tmp_path, config())
 
     assert len(client.models.calls) == 1
+    assert "API status 400" in str(raised.value)
 
 
 def test_shared_json_validation_retries_once(tmp_path: Path) -> None:
@@ -106,10 +107,30 @@ def test_shared_json_validation_retries_once(tmp_path: Path) -> None:
     client = FakeGenAIClient([response(reordered), response(reordered)])
     backend = GeminiBackend("gemini-3.5-flash-lite", client=client, sleep=lambda _: None)
 
-    with pytest.raises(VisionFailed):
+    with pytest.raises(VisionFailed) as raised:
         backend.describe([frame(1), frame(2)], "", tmp_path, config())
 
     assert len(client.models.calls) == 2
+    assert "expected frame indices" in str(raised.value)
+
+
+def test_bad_reply_retries_accumulate_gemini_tokens(tmp_path: Path) -> None:
+    write_jpeg(tmp_path / "f0001.jpg", b"one")
+    bad = FakeGeminiResponse(
+        text="not a list",
+        usage_metadata=FakeUsageMetadata(
+            prompt_token_count=200, candidates_token_count=10, thoughts_token_count=5
+        ),
+    )
+    client = FakeGenAIClient([bad, response()])
+    backend = GeminiBackend("gemini-3.5-flash-lite", client=client, sleep=lambda _: None)
+
+    _, usage = backend.describe([frame(1)], "", tmp_path, config())
+
+    assert usage.calls == 2
+    assert usage.tokens_in == 200 + 1000
+    assert usage.tokens_out == 10 + 100
+    assert usage.tokens_reasoning == 5 + 20
 
 
 def test_unknown_model_marks_dollars_unknown(tmp_path: Path) -> None:
