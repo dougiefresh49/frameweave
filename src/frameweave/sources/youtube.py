@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -24,9 +25,6 @@ from frameweave.types import Chapter, Resolved, Segment
 from frameweave.util.media import NotMediaError, sniff
 from frameweave.util.retry import (
     Outcome,
-    RequestFailed,
-    RequestTimeout,
-    RetryExhausted,
     call,
 )
 
@@ -39,6 +37,53 @@ YTDLP_PIN = "2026.8.19"
 CLIENT_CHAIN = ("android", "mweb", "web")
 FORMAT_LADDER = "bv*[height<=720]+ba/b[height<=720]/b"
 FORMAT_PROGRESSIVE = "b"
+_CLAIM_PID_RETRIES = 10
+_CLAIM_PID_SLEEP_S = 0.05
+
+# Fields copied from yt-dlp's info-dict into media.json. Excludes filepath,
+# cookies, http_headers, and other host-local secrets the real dict carries.
+_MEDIA_JSON_ALLOWLIST = frozenset(
+    {
+        "id",
+        "title",
+        "ext",
+        "format",
+        "format_id",
+        "format_note",
+        "width",
+        "height",
+        "fps",
+        "vcodec",
+        "acodec",
+        "tbr",
+        "abr",
+        "vbr",
+        "asr",
+        "filesize",
+        "filesize_approx",
+        "duration",
+        "resolution",
+        "dynamic_range",
+        "protocol",
+        "container",
+    }
+)
+
+_PERMANENT_ERROR_MARKERS = (
+    "private video",
+    "video unavailable",
+    "this video is not available",
+    "this video has been removed",
+    "has been removed by the uploader",
+    "sign in to confirm your age",
+    "members-only content",
+    "join this channel",
+    "login required",
+    "copyright claim",
+    "who has blocked it on copyright grounds",
+    "uploader has closed their youtube account",
+    "account associated with this video has been terminated",
+)
 
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _URL_RE = re.compile(r"https?://[^\s<>\"']+")
@@ -103,15 +148,6 @@ class _AdvanceResult:
     message: str
 
 
-def _default_runner(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-m", "yt_dlp", *args],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
 def _version_tuple(version: str) -> tuple[int, ...]:
     parts: list[int] = []
     for piece in version.split("."):
@@ -127,6 +163,11 @@ def _is_client_advance(message: str) -> bool:
     return "403" in lower or "requested format not available" in lower
 
 
+def _is_permanent_error(message: str) -> bool:
+    lower = message.lower()
+    return any(marker in lower for marker in _PERMANENT_ERROR_MARKERS)
+
+
 def classify(exc_or_response: object) -> Outcome:
     """Classify a yt-dlp result for ``retry.call``."""
     if isinstance(exc_or_response, (_DownloadOk, _AdvanceResult, dict)):
@@ -137,10 +178,28 @@ def classify(exc_or_response: object) -> Outcome:
         lower = exc_or_response.message.lower()
         if "timed out" in lower or "timeout" in lower:
             return Outcome(status="timeout")
+        if _is_permanent_error(exc_or_response.message):
+            return Outcome(status="fail")
         return Outcome(status="retry")
     if isinstance(exc_or_response, Exception):
         return Outcome(status="fail")
     return Outcome(status="fail")
+
+
+def _is_media_artifact(path: Path) -> bool:
+    """True for downloaded media; false for sidecars and partials."""
+    name = path.name
+    if name in {"media.json", "media.json.partial"}:
+        return False
+    if name.endswith(".part") or name.endswith(".ytdl") or name.endswith(".partial"):
+        return False
+    if path.suffix == ".json":
+        return False
+    return name.startswith("media.")
+
+
+def _allowlisted_info(info: dict[str, Any]) -> dict[str, Any]:
+    return {k: info[k] for k in _MEDIA_JSON_ALLOWLIST if k in info}
 
 
 def _extract_video_id(raw: str) -> str | None:
@@ -273,6 +332,8 @@ def claim(source_dir: Path) -> Iterator[None]:
 
     A second concurrent claim raises ``SourceBusy`` naming the live holder pid
     (does not wait). A claim whose pid is dead is treated as stale and taken.
+    A missing or unreadable pid is treated as busy with a short retry — never
+    removed, so a holder that has mkdir'd but not yet written pid is safe.
     """
     source_dir.mkdir(parents=True, exist_ok=True)
     claim_dir = source_dir / ".claim"
@@ -282,11 +343,15 @@ def claim(source_dir: Path) -> Iterator[None]:
             break
         except FileExistsError:
             pid_path = claim_dir / "pid"
-            try:
-                recorded = int(pid_path.read_text().strip())
-            except (OSError, ValueError):
-                _remove_claim(claim_dir)
-                continue
+            recorded: int | None = None
+            for _ in range(_CLAIM_PID_RETRIES):
+                try:
+                    recorded = int(pid_path.read_text().strip())
+                    break
+                except (OSError, ValueError):
+                    time.sleep(_CLAIM_PID_SLEEP_S)
+            if recorded is None:
+                raise SourceBusy(0) from None
             if _pid_alive(recorded):
                 raise SourceBusy(recorded) from None
             _remove_claim(claim_dir)
@@ -355,10 +420,20 @@ class YouTubeSource:
         youtube_client: str | None = None,
         attempts: int = 3,
     ) -> None:
-        self._runner = runner or _default_runner
         self._timeout_s = timeout_s
+        self._runner = runner or self._default_runner
         self._youtube_client = youtube_client
         self._attempts = attempts
+
+    def _default_runner(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "yt_dlp", *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=self._timeout_s,
+            stdin=subprocess.DEVNULL,
+        )
 
     def matches(self, raw_input: str) -> bool:
         return _extract_video_id(raw_input) is not None
@@ -367,7 +442,8 @@ class YouTubeSource:
         video_id = _extract_video_id(raw_input)
         if video_id is None:
             raise ValueError(f"not a YouTube input: {raw_input!r}")
-        info = self._resolve_info(raw_input if "://" in raw_input else video_id)
+        # Canonical watch URL (no playlist id) so -J never returns a playlist dict.
+        info = self._resolve_info(_canonical_source(video_id, raw_input))
         channel = str(info.get("uploader") or info.get("channel") or "")
         description = str(info.get("description") or "")
         return Resolved(
@@ -412,13 +488,8 @@ class YouTubeSource:
                         last_error = fallback_exc
                         break
                 continue
-            except RequestTimeout:
-                raise
-            except (RequestFailed, RetryExhausted) as exc:
-                last_error = exc
-                if is_last:
-                    break
-                continue
+            # Permanent, retry-exhausted, and other non-advance errors stop the chain.
+            # Only 403 / format-unavailable (ClientAdvance) move to the next client.
 
         if last_error is not None:
             raise last_error
@@ -432,7 +503,14 @@ class YouTubeSource:
     def _resolve_info(self, target: str) -> dict[str, Any]:
         def once() -> dict[str, Any]:
             proc = self._runner(
-                ["-J", "--no-download", "--skip-download", "--", target]
+                [
+                    "-J",
+                    "--no-download",
+                    "--skip-download",
+                    "--no-playlist",
+                    "--",
+                    target,
+                ]
             )
             if proc.returncode != 0:
                 err = (proc.stderr or proc.stdout or "").strip() or "yt-dlp failed"
@@ -460,10 +538,8 @@ class YouTubeSource:
         expected = meta.get("sha256")
         if not expected:
             return None
-        for path in sorted(dest_dir.glob("media.*")):
-            if path.name == "media.json" or path.suffix in {".part", ".ytdl"}:
-                continue
-            if path.name.endswith(".part") or path.name.endswith(".ytdl"):
+        for path in sorted(dest_dir.iterdir()):
+            if not _is_media_artifact(path):
                 continue
             try:
                 if _sha256_file(path) == expected:
@@ -508,6 +584,8 @@ class YouTubeSource:
             f"youtube:player_client={client}",
             "-o",
             outtmpl,
+            "--print-json",
+            "--no-playlist",
             "--",
             resolved.source,
         ]
@@ -522,14 +600,7 @@ class YouTubeSource:
         if media is None:
             raise YtDlpError("yt-dlp exited 0 but wrote no media file")
         info: dict[str, Any] = {}
-        for candidate in dest_dir.glob("*.info.json"):
-            try:
-                info = json.loads(candidate.read_text())
-                candidate.unlink(missing_ok=True)
-                break
-            except (OSError, json.JSONDecodeError):
-                continue
-        if not info and (proc.stdout or "").strip().startswith("{"):
+        if (proc.stdout or "").strip().startswith("{"):
             try:
                 info = json.loads(proc.stdout.strip().splitlines()[-1])
             except json.JSONDecodeError:
@@ -537,14 +608,7 @@ class YouTubeSource:
         return _DownloadOk(path=media, info=info, client=client, degraded=degraded)
 
     def _find_media_file(self, dest_dir: Path) -> Path | None:
-        candidates = [
-            p
-            for p in dest_dir.glob("media.*")
-            if p.name != "media.json"
-            and not p.name.endswith(".part")
-            and not p.name.endswith(".ytdl")
-            and p.suffix != ".json"
-        ]
+        candidates = [p for p in dest_dir.iterdir() if _is_media_artifact(p)]
         if not candidates:
             return None
         return max(candidates, key=lambda p: p.stat().st_mtime)
@@ -564,7 +628,7 @@ class YouTubeSource:
 
         sha = _sha256_file(path)
         meta = {
-            **{k: v for k, v in result.info.items() if k != "formats"},
+            **_allowlisted_info(result.info),
             "client": result.client,
             "format_id": result.info.get("format_id"),
             "sha256": sha,
@@ -594,6 +658,8 @@ class YouTubeSource:
             capture_output=True,
             text=True,
             check=False,
+            timeout=self._timeout_s,
+            stdin=subprocess.DEVNULL,
         )
         if proc.returncode != 0:
             stderr = proc.stderr or proc.stdout or "ffprobe failed"

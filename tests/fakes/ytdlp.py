@@ -42,6 +42,7 @@ class FakeYtDlp:
     - ``leave_part``: writes a ``.part`` then succeeds (so cleanup can be asserted)
     - ``html_body``: writes an HTML file as ``media.mp4``
     - ``resolve_only``: resolve from ``resolve_json``; downloads fail
+    - ``private_video``: permanent error on every download client
     """
 
     def __init__(
@@ -125,6 +126,14 @@ class FakeYtDlp:
                 stderr="",
             )
 
+        if self.mode == "private_video":
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=1,
+                stdout="",
+                stderr="ERROR: [youtube] Private video. Sign in if you've been granted access",
+            )
+
         return subprocess.CompletedProcess(
             args=args, returncode=1, stdout="", stderr=f"unknown mode {self.mode}"
         )
@@ -135,13 +144,17 @@ class FakeYtDlp:
                 args=[], returncode=1, stdout="", stderr="no media fixture"
             )
         shutil.copyfile(self.media_path, dest)
+        # Include fields that must never land in media.json so allowlist tests bite.
         info = {
             "format_id": f"fake-{client}",
             "ext": "mp4",
             "id": "fake",
             "title": "fake",
+            "cookies": "SECRET_COOKIE",
+            "http_headers": {"Cookie": "SECRET_COOKIE", "User-Agent": "fake"},
+            "_filename": "/tmp/secret/path.mp4",
+            "requested_downloads": [{"filepath": "/tmp/secret/path.mp4"}],
         }
-        (dest.parent / "media.info.json").write_text(json.dumps(info) + "\n")
         return subprocess.CompletedProcess(
             args=[], returncode=0, stdout=json.dumps(info), stderr=""
         )

@@ -5,29 +5,38 @@ from __future__ import annotations
 import json
 import logging
 import multiprocessing as mp
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from frameweave.config import load
 from frameweave.sources.youtube import (
     MediaUnreadable,
     SourceBusy,
     YouTubeSource,
+    YtDlpError,
     claim,
+    classify,
+    cli_flags,
+    preflight_checks,
 )
+from frameweave.util.retry import Outcome, RequestFailed
 from tests.fakes.ytdlp import FakeYtDlp
 
 RECORDED = Path(__file__).parent / "recorded" / "youtube" / "resolve-dQw4w9WgXcQ.json"
 VIDEO_ID = "dQw4w9WgXcQ"
+MISSING_TOML = Path("/nonexistent/frameweave-config.toml")
 
 
 def _tiny_mp4(tmp_path: Path) -> Path:
     out = tmp_path / "tiny.mp4"
     if out.exists():
         return out
-    import subprocess
+    import subprocess as sp
 
-    subprocess.run(
+    sp.run(
         [
             "ffmpeg",
             "-hide_banner",
@@ -44,6 +53,18 @@ def _tiny_mp4(tmp_path: Path) -> Path:
         check=True,
     )
     return out
+
+
+def _resolved() -> object:
+    from frameweave.types import Resolved
+
+    return Resolved(
+        video_id=VIDEO_ID,
+        title="t",
+        channel="c",
+        source=f"https://www.youtube.com/watch?v={VIDEO_ID}",
+        duration=1.0,
+    )
 
 
 @pytest.mark.parametrize(
@@ -89,6 +110,21 @@ def test_resolve_from_recorded_json_links_chapters_and_t() -> None:
     assert fake.calls and "-J" in fake.calls[0]
 
 
+def test_resolve_playlist_url_uses_watch_and_no_playlist() -> None:
+    """Finding 6: playlist query must not be passed to -J."""
+    info = json.loads(RECORDED.read_text())
+    fake = FakeYtDlp(mode="resolve_only", resolve_json=info)
+    src = YouTubeSource(runner=fake, attempts=0)
+    raw = f"https://www.youtube.com/watch?v={VIDEO_ID}&list=PLdeadbeef&index=1"
+    resolved = src.resolve(raw)
+    assert resolved.source == f"https://www.youtube.com/watch?v={VIDEO_ID}"
+    assert fake.calls
+    assert "--no-playlist" in fake.calls[0]
+    target = fake.calls[0][-1]
+    assert "list=" not in target
+    assert target.startswith(f"https://www.youtube.com/watch?v={VIDEO_ID}")
+
+
 def test_fetch_chain_403_then_web_success(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     media = _tiny_mp4(tmp_path)
     fake = FakeYtDlp(mode="chain_403", media_path=media, resolve_json=RECORDED)
@@ -103,6 +139,11 @@ def test_fetch_chain_403_then_web_success(tmp_path: Path, caplog: pytest.LogCapt
     assert meta["client"] == "web"
     assert meta["sha256"]
     assert meta["bytes"] == path.stat().st_size
+    assert meta["format_id"] == "fake-web"
+    assert "cookies" not in meta
+    assert "http_headers" not in meta
+    assert "_filename" not in meta
+    assert "requested_downloads" not in meta
     clients = [
         next(
             a.split("youtube:player_client=", 1)[1]
@@ -114,26 +155,19 @@ def test_fetch_chain_403_then_web_success(tmp_path: Path, caplog: pytest.LogCapt
     ]
     assert clients == ["android", "mweb", "web"]
     assert any("player_client=web" in r.message for r in caplog.records)
+    download_calls = [c for c in fake.calls if "-J" not in c]
+    assert download_calls and "--print-json" in download_calls[-1]
 
 
 def test_part_cleanup(tmp_path: Path) -> None:
     media = _tiny_mp4(tmp_path)
     fake = FakeYtDlp(mode="leave_part", media_path=media)
     src = YouTubeSource(runner=fake, attempts=0)
-    from frameweave.types import Resolved
-
-    resolved = Resolved(
-        video_id=VIDEO_ID,
-        title="t",
-        channel="c",
-        source=f"https://www.youtube.com/watch?v={VIDEO_ID}",
-        duration=1.0,
-    )
     dest = tmp_path / "dest"
     dest.mkdir()
     (dest / "orphan.part").write_bytes(b"old")
     (dest / "orphan.ytdl").write_text("old")
-    path = src.fetch_media(resolved, dest)
+    path = src.fetch_media(_resolved(), dest)  # type: ignore[arg-type]
     assert path.exists()
     assert list(dest.glob("*.part")) == []
     assert list(dest.glob("*.ytdl")) == []
@@ -143,21 +177,32 @@ def test_sha256_reuse_zero_runner_calls(tmp_path: Path) -> None:
     media = _tiny_mp4(tmp_path)
     fake = FakeYtDlp(mode="chain_403", media_path=media)
     src = YouTubeSource(runner=fake, attempts=0)
-    from frameweave.types import Resolved
-
-    resolved = Resolved(
-        video_id=VIDEO_ID,
-        title="t",
-        channel="c",
-        source=f"https://www.youtube.com/watch?v={VIDEO_ID}",
-        duration=1.0,
-    )
     dest = tmp_path / "dest"
-    first = src.fetch_media(resolved, dest)
+    first = src.fetch_media(_resolved(), dest)  # type: ignore[arg-type]
     calls_after_first = len(fake.calls)
-    second = src.fetch_media(resolved, dest)
+    second = src.fetch_media(_resolved(), dest)  # type: ignore[arg-type]
     assert second == first
     assert len(fake.calls) == calls_after_first
+
+
+def test_reuse_ignores_media_json_partial(tmp_path: Path) -> None:
+    """Finding 8: media.json.partial must not match as media.*."""
+    media = _tiny_mp4(tmp_path)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    final = dest / "media.mp4"
+    final.write_bytes(media.read_bytes())
+    import hashlib
+
+    sha = hashlib.sha256(final.read_bytes()).hexdigest()
+    (dest / "media.json").write_text(json.dumps({"sha256": sha}) + "\n")
+    # Leftover partial with different bytes — must not be chosen over media.mp4.
+    (dest / "media.json.partial").write_bytes(b"not-media-and-wrong-hash")
+    fake = FakeYtDlp(mode="chain_403", media_path=media)
+    src = YouTubeSource(runner=fake, attempts=0)
+    path = src.fetch_media(_resolved(), dest)  # type: ignore[arg-type]
+    assert path == final
+    assert fake.calls == []
 
 
 def _claim_worker(
@@ -210,33 +255,119 @@ def test_claim_stale_pid_is_taken(tmp_path: Path) -> None:
     assert not (source_dir / ".claim").exists()
 
 
+def test_claim_missing_pid_is_busy_not_stolen(tmp_path: Path) -> None:
+    """Finding 4: mkdir without pid must not be removed by a racer."""
+    source_dir = tmp_path / "source"
+    claim_dir = source_dir / ".claim"
+    claim_dir.mkdir(parents=True)
+    # No pid file — live holder mid-write.
+    with pytest.raises(SourceBusy) as exc:
+        with claim(source_dir):
+            pass
+    assert exc.value.pid == 0
+    assert claim_dir.is_dir()
+    assert not (claim_dir / "pid").exists()
+
+
 def test_ffprobe_rejects_html_body(tmp_path: Path) -> None:
     fake = FakeYtDlp(mode="html_body")
     src = YouTubeSource(runner=fake, attempts=0)
-    from frameweave.types import Resolved
-
-    resolved = Resolved(
-        video_id=VIDEO_ID,
-        title="t",
-        channel="c",
-        source=f"https://www.youtube.com/watch?v={VIDEO_ID}",
-        duration=1.0,
-    )
     dest = tmp_path / "dest"
     with pytest.raises(MediaUnreadable) as exc:
-        src.fetch_media(resolved, dest)
+        src.fetch_media(_resolved(), dest)  # type: ignore[arg-type]
     assert "media" in str(exc.value.path)
-    assert not any(dest.glob("media.*")) or not (dest / "media.mp4").exists()
+    assert not Path(exc.value.path).exists()
+    assert not (dest / "media.mp4").exists()
 
 
 def test_fetch_captions_returns_none() -> None:
-    from frameweave.types import Resolved
+    assert YouTubeSource().fetch_captions(_resolved()) is None  # type: ignore[arg-type]
 
-    resolved = Resolved(
-        video_id=VIDEO_ID,
-        title="t",
-        channel="c",
-        source=f"https://www.youtube.com/watch?v={VIDEO_ID}",
-        duration=1.0,
+
+def test_print_json_and_allowlist_in_media_json(tmp_path: Path) -> None:
+    """Finding 2: --print-json on download; secrets never land in media.json."""
+    media = _tiny_mp4(tmp_path)
+    fake = FakeYtDlp(mode="chain_403", media_path=media)
+    src = YouTubeSource(runner=fake, youtube_client="web", attempts=0)
+    dest = tmp_path / "dest"
+    src.fetch_media(_resolved(), dest)  # type: ignore[arg-type]
+    assert any("--print-json" in c for c in fake.calls)
+    meta = json.loads((dest / "media.json").read_text())
+    for forbidden in ("cookies", "http_headers", "_filename", "requested_downloads"):
+        assert forbidden not in meta
+    assert meta["format_id"] == "fake-web"
+    assert meta["title"] == "fake"
+
+
+def test_default_runner_passes_timeout_and_stdin_devnull() -> None:
+    """Finding 3: hard timeout + closed stdin on the real runner."""
+    src = YouTubeSource(timeout_s=17.0)
+    with patch("frameweave.sources.youtube.subprocess.run") as run:
+        run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="{}", stderr=""
+        )
+        src._default_runner(["-J", "--", VIDEO_ID])
+    kwargs = run.call_args.kwargs
+    assert kwargs["timeout"] == 17.0
+    assert kwargs["stdin"] is subprocess.DEVNULL
+
+
+def test_ffprobe_passes_timeout_and_stdin_devnull(tmp_path: Path) -> None:
+    """Finding 3: same for ffprobe."""
+    path = tmp_path / "x.mp4"
+    path.write_bytes(b"not-really")
+    src = YouTubeSource(timeout_s=9.0)
+    with patch("frameweave.sources.youtube.subprocess.run") as run:
+        run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="bad"
+        )
+        with pytest.raises(MediaUnreadable):
+            src._ffprobe_or_raise(path)
+    kwargs = run.call_args.kwargs
+    assert kwargs["timeout"] == 9.0
+    assert kwargs["stdin"] is subprocess.DEVNULL
+
+
+def test_classify_timeout_expired_is_timeout() -> None:
+    """Finding 3: TimeoutExpired branch is reachable once subprocess uses timeout=."""
+    exc = subprocess.TimeoutExpired(cmd=["yt-dlp"], timeout=1)
+    assert classify(exc) == Outcome(status="timeout")
+
+
+def test_classify_private_video_is_fail() -> None:
+    """Finding 5: permanent yt-dlp messages must not retry."""
+    assert classify(YtDlpError("ERROR: [youtube] Private video")) == Outcome(
+        status="fail"
     )
-    assert YouTubeSource().fetch_captions(resolved) is None
+
+
+def test_private_video_does_not_advance_clients(tmp_path: Path) -> None:
+    """Finding 5: only 403 / format-unavailable advances the chain."""
+    fake = FakeYtDlp(mode="private_video")
+    src = YouTubeSource(runner=fake, attempts=0)
+    with pytest.raises(RequestFailed):
+        src.fetch_media(_resolved(), tmp_path / "dest")  # type: ignore[arg-type]
+    download_calls = [c for c in fake.calls if "-J" not in c]
+    assert len(download_calls) == 1
+    assert "youtube:player_client=android" in " ".join(download_calls[0])
+
+
+def test_cli_flags_youtube_client() -> None:
+    """Finding 7: --youtube-client FlagSpec."""
+    flags = cli_flags()
+    assert len(flags) == 1
+    assert flags[0].name == "--youtube-client"
+    assert flags[0].dest == "youtube_client"
+    assert flags[0].default is None
+    assert flags[0].type is str
+
+
+def test_preflight_checks_ytdlp_importable() -> None:
+    """Finding 7: yt-dlp version Check."""
+    cfg = load(env={}, toml_path=MISSING_TOML, dotenv_paths=[])
+    checks = preflight_checks(cfg)
+    assert len(checks) == 1
+    assert checks[0].name == "yt-dlp"
+    assert checks[0].ok is True
+    assert checks[0].remedy == "uv sync"
+    assert "yt-dlp" in checks[0].detail
