@@ -111,10 +111,11 @@ def merge_into_presentation(
         if current and _speaker_change(current[0].speaker, segment.speaker):
             flush()
 
-        if current and span_of(current) >= min_s:
-            proposed = segment.end - current[0].start
-            if proposed > max_s:
-                flush()
+        # Enforce max_s even when the current group is still under min_s (a 15 s
+        # group plus a 30 s segment must not become 45 s). Never split a unit, so
+        # a single oversize segment still passes through alone after a flush.
+        if current and (segment.end - current[0].start) > max_s:
+            flush()
 
         current.append(segment)
         if span_of(current) >= min_s and _SENTENCE_END.search(segment.text.rstrip()):

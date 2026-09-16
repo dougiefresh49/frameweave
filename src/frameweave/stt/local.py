@@ -74,10 +74,11 @@ class WhisperXBackend:
         audio: Path,
         chunk_results: list[tuple[Chunk, SttResult]],
     ) -> list[Segment]:
-        """Merge chunk transcripts, diarize once, then form presentation spans."""
-        segments = merge_chunks(chunk_results)
+        """Chunk-merge, clamp, diarize (optional), then form presentation spans."""
+        segments = clamp_to_words(merge_chunks(chunk_results))
         if self.diarize is not None:
-            segments = self.diarize(audio, segments)
+            with _quiet_third_party():
+                segments = self.diarize(audio, segments)
         return merge_into_presentation(segments)
 
     def _transcribe(self, audio: Path, config: Config, started: float) -> SttResult:
@@ -121,11 +122,10 @@ class WhisperXBackend:
                     return_char_alignments=False,
                 )
                 segments, dropped_words = _segments(aligned.get("segments", []))
+                # Keep raw (clamped) segments here. Presentation merge runs only after
+                # merge_chunks in merge_and_diarize so overlap dedup never drops a
+                # whole 20–40 s span at a chunk boundary.
                 segments = clamp_to_words(segments)
-                # When diarization will run in merge_and_diarize, keep raw segments so
-                # speaker turns are assigned before presentation merge.
-                if self.diarize is None:
-                    segments = merge_into_presentation(segments)
             else:
                 segments = []
 

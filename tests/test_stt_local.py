@@ -190,14 +190,152 @@ def test_merge_into_presentation_respects_speaker_boundaries() -> None:
     assert len(merged[1].words or []) == 6
 
 
-def test_merge_into_presentation_closes_at_max_without_sentence_end() -> None:
+def test_merge_into_presentation_closes_at_exactly_forty_without_sentence_end() -> None:
+    """Finding 5: pin the 40 s close — ten 4 s units flush at max before the 11th."""
     raw = [
         _segment(i * 4.0, i * 4.0 + 4.0, "no stop yet")
         for i in range(12)  # 48 s with no sentence ends
     ]
     merged = merge_into_presentation(raw)
+    assert merged[0].start == 0.0
+    assert merged[0].end == 40.0
+    assert merged[1].start == 40.0
     assert all(segment.end - segment.start <= 40.0 for segment in merged)
-    assert len(merged) >= 2
+    assert len(merged) == 2
+
+
+def test_merge_into_presentation_enforces_max_before_min_reached() -> None:
+    """Finding 3: a 15 s group plus a 30 s segment must not become 45 s."""
+    raw = [
+        _segment(0.0, 15.0, "short group so far"),
+        _segment(15.0, 45.0, "long unit that would overshoot"),
+    ]
+    merged = merge_into_presentation(raw)
+    assert [segment.end - segment.start for segment in merged] == [15.0, 30.0]
+    assert [segment.text for segment in merged] == [
+        "short group so far",
+        "long unit that would overshoot",
+    ]
+
+
+def test_merge_into_presentation_passes_sixty_second_unit_unsplit() -> None:
+    """Finding 5: never split a segment — a lone 60 s unit stays one span."""
+    raw = [_segment(0.0, 60.0, "one very long whisper segment without breaks.")]
+    merged = merge_into_presentation(raw)
+    assert len(merged) == 1
+    assert merged[0].start == 0.0
+    assert merged[0].end == 60.0
+
+
+def test_merge_into_presentation_quality_is_mean_of_constituents() -> None:
+    """Finding 5: quality mean asserted numerically."""
+    raw = [
+        _segment(0.0, 4.0, "a", quality=-0.2),
+        _segment(4.0, 8.0, "b", quality=-0.4),
+        _segment(8.0, 12.0, "c", quality=-0.6),
+        _segment(12.0, 16.0, "d", quality=-0.8),
+        _segment(16.0, 20.0, "Done.", quality=-1.0),
+    ]
+    merged = merge_into_presentation(raw)
+    assert len(merged) == 1
+    assert merged[0].quality == pytest.approx((-0.2 - 0.4 - 0.6 - 0.8 - 1.0) / 5)
+
+
+def test_merge_and_diarize_merges_only_after_chunk_join(tmp_path: Path) -> None:
+    """Finding 1: presentation merge after merge_chunks keeps chunk-N+1 post-cutoff text.
+
+    If each chunk were presentation-merged first, chunk 2's first ~38 s span would
+    start before the overlap midpoint and be dropped entirely.
+    """
+    backend = WhisperXBackend()
+    first = Chunk(tmp_path / "000.wav", offset_s=0.0, duration_s=900.0)
+    second = Chunk(tmp_path / "001.wav", offset_s=898.0, duration_s=900.0)
+    # Raw shorts at the end of chunk 1 (not pre-merged into a long span).
+    first_segs = [
+        *[_segment(float(860 + i * 4), float(864 + i * 4), "keep going") for i in range(9)],
+        _segment(896.0, 900.0, "End one."),
+    ]
+    # Chunk 2 local: overlap dup then unique shorts that must survive + pad to 20–40 s.
+    second_segs = [
+        _segment(0.5, 1.0, "overlap dup"),  # rebased 898.5 < cutoff 899 → dropped
+        _segment(1.5, 5.5, "kept after boundary"),  # rebased 899.5 ≥ 899 → kept
+        *[_segment(5.5 + i * 4.0, 9.5 + i * 4.0, "keep going") for i in range(7)],
+        _segment(33.5, 37.5, "Second chunk close."),
+    ]
+    first_result = _result(*first_segs, audio_seconds=900.0)
+    second_result = _result(*second_segs, audio_seconds=900.0)
+
+    merged = backend.merge_and_diarize(
+        tmp_path / "full.wav", [(first, first_result), (second, second_result)]
+    )
+
+    texts = " ".join(segment.text for segment in merged)
+    assert "kept after boundary" in texts
+    assert "Second chunk close." in texts
+    assert "overlap dup" not in texts
+    assert any(20.0 <= segment.end - segment.start <= 40.0 for segment in merged)
+
+
+def test_transcribe_returns_raw_clamped_segments_not_presentation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 1: _transcribe must not call merge_into_presentation."""
+    audio = tmp_path / "chunk.wav"
+    audio.write_bytes(b"")
+    raw = [
+        {
+            "start": float(i * 4),
+            "end": float(i * 4 + 4),
+            "text": "keep going",
+            "avg_logprob": -0.2,
+            "words": [
+                {"word": "keep", "start": float(i * 4), "end": float(i * 4 + 2), "score": 0.9},
+                {"word": "going", "start": float(i * 4 + 2), "end": float(i * 4 + 4), "score": 0.8},
+            ],
+        }
+        for i in range(10)
+    ]
+
+    model = MagicMock()
+    model.transcribe.return_value = {"segments": raw, "language": "en"}
+    fake_whisperx = SimpleNamespace(
+        load_model=lambda *a, **k: model,
+        load_audio=lambda path: [],
+        load_align_model=lambda **k: (MagicMock(), {}),
+        align=lambda *a, **k: {"segments": raw},
+    )
+    monkeypatch.setitem(__import__("sys").modules, "whisperx", fake_whisperx)
+    monkeypatch.setattr("frameweave.stt.local.duration", lambda path, timeout_s=120.0: 40.0)
+
+    result = WhisperXBackend().transcribe(audio, _config())
+
+    # Ten raw units, not collapsed into a few 20–40 s presentation spans.
+    assert len(result.segments) == 10
+    assert all(segment.end - segment.start <= 4.0 for segment in result.segments)
+
+
+def test_merge_and_diarize_quiets_diarization(
+    tmp_path: Path,
+) -> None:
+    """Finding 4: diarize runs inside the quiet window."""
+    from dataclasses import replace
+
+    inside: dict[str, int] = {}
+
+    def fake_diarize(audio: Path, segments: list[Segment]) -> list[Segment]:
+        del audio
+        inside["pyannote"] = logging.getLogger("pyannote").level
+        inside["torch"] = logging.getLogger("torch").level
+        return [replace(segment, speaker="S1") for segment in segments]
+
+    backend = WhisperXBackend(diarize=fake_diarize)
+    chunk = Chunk(tmp_path / "000.wav", offset_s=0.0, duration_s=10.0)
+    result = _result(_segment(0.0, 4.0, "hello there."))
+    labeled = backend.merge_and_diarize(tmp_path / "full.wav", [(chunk, result)])
+
+    assert inside["pyannote"] == logging.ERROR
+    assert inside["torch"] == logging.ERROR
+    assert labeled[0].speaker == "S1"
 
 
 def test_is_silent_recognizes_empty_result() -> None:
