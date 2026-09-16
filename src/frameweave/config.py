@@ -97,6 +97,8 @@ class Config:
     disk_warn_gb: int
     prompt_revision: str
     channels: dict[str, str]
+    captions_mode: str  # auto | manual | none (issue #8)
+    vision_effort: str  # codex reasoning effort for frames: low | medium (issue #11)
 
 
 _KINDS: dict[str, str] = {
@@ -120,6 +122,8 @@ _KINDS: dict[str, str] = {
     "disk_warn_gb": "int",
     "prompt_revision": "str",
     "channels": "channels",
+    "captions_mode": "str",
+    "vision_effort": "str",
 }
 
 
@@ -145,6 +149,8 @@ def _defaults() -> dict[str, object]:
         "disk_warn_gb": 10,
         "prompt_revision": "1",
         "channels": {},
+        "captions_mode": "auto",
+        "vision_effort": "low",
     }
 
 
