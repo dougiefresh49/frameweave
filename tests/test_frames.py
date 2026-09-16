@@ -150,12 +150,16 @@ def test_extract_pixel_time(tmp_path: Path) -> None:
     path_5 = tmp_path / "c" / other[0].path
     assert path_4a.name == "f0001-00-00-04.0.jpg"
     assert _jpeg_width(path_4a) == 1280
-    crop_4a = _raw_crop(path_4a, _CROP)
-    crop_4b = _raw_crop(path_4b, _CROP)
-    crop_5 = _raw_crop(path_5, _CROP)
-    assert crop_4a == crop_4b
-    assert crop_4a != crop_5
-    if not make_synthetic.drew_timecode:
+    if make_synthetic.drew_timecode:
+        # The burned-in timecode crop proves the frame is at its requested time.
+        crop_4a = _raw_crop(path_4a, _CROP)
+        crop_4b = _raw_crop(path_4b, _CROP)
+        crop_5 = _raw_crop(path_5, _CROP)
+        assert crop_4a == crop_4b
+        assert crop_4a != crop_5
+    else:
+        # No font on this machine (CI macOS runners): compare whole frames against
+        # ffmpeg's own single-frame render at the same times instead.
         ref_4 = _reference_render(media, 4.0, tmp_path / "ref4.jpg")
         ref_5 = _reference_render(media, 5.0, tmp_path / "ref5.jpg")
         got_4 = _raw_rgb(path_4a)
