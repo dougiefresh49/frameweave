@@ -22,4 +22,16 @@ if [ -n "$hits" ]; then
   echo "$hits" >&2
   exit 1
 fi
+# Public-readiness: no IPv4 address anywhere in tracked text (a recorded fixture once carried a home
+# IP inside a caption URL, caught in review of PR #32). Version strings have three parts, so an
+# address needs all four octets to match.
+ips="$(git ls-files --cached --others --exclude-standard -z \
+  | grep -z -v -E '^(uv\.lock)$' \
+  | xargs -0 grep -I -n -E '(^|[^0-9.])([0-9]{1,3}\.){3}[0-9]{1,3}([^0-9.]|$)' -- 2>/dev/null \
+  | grep -v -E '127\.0\.0\.1|0\.0\.0\.0|example|placeholder' || true)"
+if [ -n "$ips" ]; then
+  echo "scrub: IPv4 address found (replace with a placeholder):" >&2
+  echo "$ips" >&2
+  exit 1
+fi
 echo "scrub: clean ($(git ls-files --cached --others --exclude-standard | wc -l | tr -d ' ') files)"

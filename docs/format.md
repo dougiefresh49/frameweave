@@ -46,7 +46,9 @@ The productions, exactly:
 <chapter>  = ## [<time>] <title>
 ```
 
-A `<text>` line is a continuation and follows a `<seen>` or `<seen+>` line; there is at most one per frame line. On a `said` line the tag is followed by a colon and a space; on a `seen` or `seen+` line it is followed by a space, and the colon comes after the frame path. A reader that splits on the first space after the kind gets the tag in both cases (strip a trailing colon).
+A `<text>` line is a continuation and follows a `<seen>` or `<seen+>` line; there is at most one per frame line.
+
+Escapes and flattening, so every event stays on one line and every quoted string is unambiguous: inside a quoted `<string>`, a double quote is written `\"` and a backslash `\\`; any newline, tab, or run of whitespace in a payload, a description sentence, or a quoted string is collapsed to one space before writing; a chapter title that contains `;` keeps it on its `## [<time>] <title>` line but has it replaced by `,` in the `chapters:` header list, which is `; `-separated. A reader that splits quoted strings must honor the two escapes; nothing else is escaped. On a `said` line the tag is followed by a colon and a space; on a `seen` or `seen+` line it is followed by a space, and the colon comes after the frame path. A reader that splits on the first space after the kind gets the tag in both cases (strip a trailing colon).
 
 ### The three kinds
 
