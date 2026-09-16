@@ -1,0 +1,373 @@
+{
+  "events": [
+    {
+      "tStartMs": 0,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Welcome to this practical frame weaving demonstration"
+        }
+      ]
+    },
+    {
+      "tStartMs": 3000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Welcome to this practical frame weaving demonstration Today we inspect a small repeatable video workflow"
+        }
+      ]
+    },
+    {
+      "tStartMs": 6000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Welcome to this practical frame weaving demonstration Today we inspect a small repeatable video workflow First the source metadata identifies the recording safely"
+        }
+      ]
+    },
+    {
+      "tStartMs": 9000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Today we inspect a small repeatable video workflow First the source metadata identifies the recording safely Then captions provide a fast local transcript path"
+        }
+      ]
+    },
+    {
+      "tStartMs": 12000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "First the source metadata identifies the recording safely Then captions provide a fast local transcript path Manual tracks preserve the speaker's intended wording"
+        }
+      ]
+    },
+    {
+      "tStartMs": 15000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Then captions provide a fast local transcript path Manual tracks preserve the speaker's intended wording Automatic tracks often repeat their recent caption lines"
+        }
+      ]
+    },
+    {
+      "tStartMs": 18000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Manual tracks preserve the speaker's intended wording Automatic tracks often repeat their recent caption lines The parser removes that overlap without losing speech"
+        }
+      ]
+    },
+    {
+      "tStartMs": 21000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Automatic tracks often repeat their recent caption lines The parser removes that overlap without losing speech Clean timestamps keep every observation in proper order."
+        }
+      ]
+    },
+    {
+      "tStartMs": 24000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "The parser removes that overlap without losing speech Clean timestamps keep every observation in proper order. Short cues accumulate and I think so"
+        }
+      ]
+    },
+    {
+      "tStartMs": 24000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "The parser removes that overlap without losing speech Clean timestamps keep every observation in proper order. Short cues accumulate and I think so"
+        }
+      ]
+    },
+    {
+      "tStartMs": 27000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "so This opening section ends with a clear sentence"
+        }
+      ]
+    },
+    {
+      "tStartMs": 30000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "so This opening section ends with a clear sentence Next we compare the visible frames with spoken context"
+        }
+      ]
+    },
+    {
+      "tStartMs": 33000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "so This opening section ends with a clear sentence Next we compare the visible frames with spoken context Each sampled image receives a stable identifier"
+        }
+      ]
+    },
+    {
+      "tStartMs": 36000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Next we compare the visible frames with spoken context Each sampled image receives a stable identifier Primary frames begin where a speech segment begins"
+        }
+      ]
+    },
+    {
+      "tStartMs": 39000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Each sampled image receives a stable identifier Primary frames begin where a speech segment begins Extra frames cover meaningful changes inside longer passages"
+        }
+      ]
+    },
+    {
+      "tStartMs": 42000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Primary frames begin where a speech segment begins Extra frames cover meaningful changes inside longer passages The frame file name also carries its timestamp"
+        }
+      ]
+    },
+    {
+      "tStartMs": 45000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Extra frames cover meaningful changes inside longer passages The frame file name also carries its timestamp Agents can inspect the image when exact text matters"
+        }
+      ]
+    },
+    {
+      "tStartMs": 48000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "The frame file name also carries its timestamp Agents can inspect the image when exact text matters Descriptions summarize the screen without replacing ground truth"
+        }
+      ]
+    },
+    {
+      "tStartMs": 51000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Agents can inspect the image when exact text matters Descriptions summarize the screen without replacing ground truth Quoted strings record only what the model can read"
+        }
+      ]
+    },
+    {
+      "tStartMs": 54000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Descriptions summarize the screen without replacing ground truth Quoted strings record only what the model can read Uncertain lettering stays explicitly marked as illegible"
+        }
+      ]
+    },
+    {
+      "tStartMs": 57000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Quoted strings record only what the model can read Uncertain lettering stays explicitly marked as illegible This second section closes at another sentence."
+        }
+      ]
+    },
+    {
+      "tStartMs": 60000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Uncertain lettering stays explicitly marked as illegible This second section closes at another sentence. Now the transcript joins evidence from both channels"
+        }
+      ]
+    },
+    {
+      "tStartMs": 63000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "This second section closes at another sentence. Now the transcript joins evidence from both channels Speech remains verbatim from the selected caption track"
+        }
+      ]
+    },
+    {
+      "tStartMs": 66000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Now the transcript joins evidence from both channels Speech remains verbatim from the selected caption track Visual summaries remain clearly labeled as model descriptions"
+        }
+      ]
+    },
+    {
+      "tStartMs": 69000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Speech remains verbatim from the selected caption track Visual summaries remain clearly labeled as model descriptions Relative paths make the complete folder easy to move"
+        }
+      ]
+    },
+    {
+      "tStartMs": 72000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Visual summaries remain clearly labeled as model descriptions Relative paths make the complete folder easy to move Small JSON sidecars keep structured provenance available"
+        }
+      ]
+    },
+    {
+      "tStartMs": 75000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Relative paths make the complete folder easy to move Small JSON sidecars keep structured provenance available Plain text keeps the main artifact easy to read"
+        }
+      ]
+    },
+    {
+      "tStartMs": 78000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Small JSON sidecars keep structured provenance available Plain text keeps the main artifact easy to read Stable segment identifiers support later frame associations"
+        }
+      ]
+    },
+    {
+      "tStartMs": 81000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Plain text keeps the main artifact easy to read Stable segment identifiers support later frame associations Sentence boundaries produce coherent chunks for downstream agents"
+        }
+      ]
+    },
+    {
+      "tStartMs": 84000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Stable segment identifiers support later frame associations Sentence boundaries produce coherent chunks for downstream agents The fallback boundary stays close to thirty seconds"
+        }
+      ]
+    },
+    {
+      "tStartMs": 87000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Sentence boundaries produce coherent chunks for downstream agents The fallback boundary stays close to thirty seconds This third section completes the provenance explanation."
+        }
+      ]
+    },
+    {
+      "tStartMs": 90000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "The fallback boundary stays close to thirty seconds This third section completes the provenance explanation. Finally the run reports every resource it consumed"
+        }
+      ]
+    },
+    {
+      "tStartMs": 93000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "This third section completes the provenance explanation. Finally the run reports every resource it consumed Caption fetching uses no vision quota or dollars"
+        }
+      ]
+    },
+    {
+      "tStartMs": 96000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Finally the run reports every resource it consumed Caption fetching uses no vision quota or dollars Rate limits become warnings instead of fatal errors"
+        }
+      ]
+    },
+    {
+      "tStartMs": 99000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Caption fetching uses no vision quota or dollars Rate limits become warnings instead of fatal errors Missing tracks fall through to local speech recognition"
+        }
+      ]
+    },
+    {
+      "tStartMs": 102000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Rate limits become warnings instead of fatal errors Missing tracks fall through to local speech recognition Client audio never leaves the machine for transcription"
+        }
+      ]
+    },
+    {
+      "tStartMs": 105000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Missing tracks fall through to local speech recognition Client audio never leaves the machine for transcription Temporary files become visible only after atomic publication"
+        }
+      ]
+    },
+    {
+      "tStartMs": 108000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Client audio never leaves the machine for transcription Temporary files become visible only after atomic publication Tests replay fixed fixtures without touching the network"
+        }
+      ]
+    },
+    {
+      "tStartMs": 111000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Temporary files become visible only after atomic publication Tests replay fixed fixtures without touching the network Sequential ids make ordering obvious to every reader"
+        }
+      ]
+    },
+    {
+      "tStartMs": 114000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Tests replay fixed fixtures without touching the network Sequential ids make ordering obvious to every reader The final artifact preserves its raw English caption track"
+        }
+      ]
+    },
+    {
+      "tStartMs": 117000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "Sequential ids make ordering obvious to every reader The final artifact preserves its raw English caption track The demonstration finishes with one last complete sentence!"
+        }
+      ]
+    }
+  ]
+}
