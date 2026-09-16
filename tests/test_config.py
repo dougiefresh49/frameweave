@@ -431,3 +431,13 @@ def test_preflight_checks(tmp_path: Path) -> None:
     ok = preflight_checks(load_cfg(flags={"out": out, "cache_dir": cache}))
     assert all(item.ok for item in ok)
     assert all(item.required for item in ok)
+
+
+def test_env_example_loads_cleanly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The template must be copyable to .env as-is (Sol review, PR #31)."""
+    example = Path(__file__).resolve().parents[1] / ".env.example"
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "nohome")
+    cfg = load(flags={}, env={}, toml_path=tmp_path / "none.toml", dotenv_paths=[example])
+    assert cfg.out is not None
+    assert cfg.frames_per_call == 8
+    assert cfg.channels == {}
