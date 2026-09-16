@@ -7,7 +7,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from PIL import Image, ImageDraw, ImageFont
+
+PIL = pytest.importorskip("PIL")  # the dedupe extras group; CI installs it, a bare env skips
+from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 
 from frameweave.config import load
 from frameweave.dedupe import (
