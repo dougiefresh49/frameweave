@@ -344,6 +344,43 @@ def test_require_out_before_stage_1(tmp_path: Path) -> None:
     assert vision.calls == 0
 
 
+def test_out_override_uses_exact_path(tmp_path: Path) -> None:
+    """--out / out_override is the folder itself, not channel/title under it."""
+    video = _video(tmp_path)
+    cfg = replace(_cfg(tmp_path), out=None)
+    exact = tmp_path / "exact-out"
+    source = FakeSource(video=video)
+    outcome = run(
+        str(video),
+        cfg,
+        source=source,
+        stt=FakeStt(),
+        vision=FakeVision(),
+        out_override=exact,
+    )
+    assert outcome.output_path == exact.resolve()
+    assert (exact / "transcript.fwv").is_file()
+
+
+def test_resolved_kwarg_skips_second_resolve(tmp_path: Path) -> None:
+    """Caller-supplied resolved facts are used; source.resolve is not called again."""
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path)
+    source = FakeSource(video=video)
+    resolved = source.resolve(str(video))
+    assert source.resolve_calls == 1
+    outcome = run(
+        str(video),
+        cfg,
+        source=source,
+        stt=FakeStt(),
+        vision=FakeVision(),
+        resolved=resolved,
+    )
+    assert source.resolve_calls == 1
+    assert outcome.output_path.is_dir()
+
+
 def test_speakers_unavailable_before_stage_1(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
