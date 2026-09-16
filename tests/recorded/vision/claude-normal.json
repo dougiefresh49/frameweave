@@ -1,0 +1,10 @@
+{
+  "_fixture_note": "Hand-written from the real Claude Code --output-format json shape observed in spike/provider-fit.",
+  "result": "[{\"frame\":1,\"description\":\"A terminal window.\",\"text\":[\"QUEUE_NAME=jobs\"],\"illegible\":false},{\"frame\":2,\"description\":\"An editor tab.\",\"text\":[\"worker.py\"],\"illegible\":false},{\"frame\":3,\"description\":\"A queue dashboard.\",\"text\":[\"12   pending\"],\"illegible\":true}]",
+  "usage": {
+    "input_tokens": 100,
+    "cache_read_input_tokens": 20,
+    "cache_creation_input_tokens": 5,
+    "output_tokens": 30
+  }
+}

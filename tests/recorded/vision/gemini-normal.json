@@ -1,0 +1,9 @@
+{
+  "_fixture_note": "Hand-written from the real google-genai response and usage shape observed in spike/provider-fit.",
+  "text": "[{\"frame\":1,\"description\":\"A terminal window.\",\"text\":[\"QUEUE_NAME=jobs\"],\"illegible\":false}]",
+  "usage_metadata": {
+    "prompt_token_count": 1000,
+    "candidates_token_count": 100,
+    "thoughts_token_count": 20
+  }
+}
