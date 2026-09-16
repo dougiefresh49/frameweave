@@ -509,11 +509,56 @@ def test_injected_empty_env_is_honoured(tmp_path: Path) -> None:
 def test_cache_size(tmp_path: Path) -> None:
     kwargs = _load_kwargs(tmp_path)
     cache = Path(kwargs["env"]["FRAMEWEAVE_CACHE_DIR"])
+    (cache / "sources" / "vid-a" / "media.mp4").parent.mkdir(parents=True)
+    (cache / "sources" / "vid-a" / "media.mp4").write_bytes(b"a" * 100)
+    (cache / "runs" / "vid-a" / "rk" / "frames.json").parent.mkdir(parents=True)
+    (cache / "runs" / "vid-a" / "rk" / "frames.json").write_bytes(b"b" * 50)
     (cache / "marker.txt").write_text("hi\n", encoding="utf-8")
     buf = io.StringIO()
     code = main(["cache", "size"], stdout=buf, **kwargs)
     assert code == 0
-    assert "cache:" in buf.getvalue()
+    text = buf.getvalue()
+    assert "vid-a:" in text
+    assert "sources" in text
+    assert "runs" in text
+    assert "cache:" in text
+
+
+def test_cache_prune_plan_and_yes(tmp_path: Path) -> None:
+    import os
+    from datetime import UTC, datetime, timedelta
+
+    kwargs = _load_kwargs(tmp_path)
+    cache = Path(kwargs["env"]["FRAMEWEAVE_CACHE_DIR"])
+    old = (datetime.now(UTC) - timedelta(days=40)).timestamp()
+    media = cache / "sources" / "old-vid" / "media.mp4"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"old-bytes")
+    os.utime(media, (old, old))
+
+    plan = io.StringIO()
+    code = main(
+        ["cache", "prune", "--older-than", "30d"],
+        stdout=plan,
+        **kwargs,
+    )
+    assert code == 0
+    plan_text = plan.getvalue()
+    assert "would delete sources/old-vid" in plan_text
+    assert "add --yes to delete" in plan_text
+    assert media.is_file()
+
+    done = io.StringIO()
+    code = main(
+        ["cache", "prune", "--older-than", "30d", "--yes"],
+        stdout=done,
+        **kwargs,
+    )
+    assert code == 0
+    done_text = done.getvalue()
+    assert "deleted sources/old-vid" in done_text
+    assert "freed:" in done_text
+    assert not media.exists()
 
 
 def test_format_cost_prints_dollars_for_metered_or_nonzero() -> None:
