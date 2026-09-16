@@ -1,0 +1,14 @@
+{
+  "source_file": "4-wrapup.mp4",
+  "start_s": 300,
+  "duration_s": 60,
+  "note": "Hand-marked turn starts for the 60 s window at 300 s into 4-wrapup.mp4. S1 client, S2 Doug. Times are clip-relative.",
+  "turns": [
+    {"start_s": 0.2, "speaker": "S1"},
+    {"start_s": 23.0, "speaker": "S2"},
+    {"start_s": 35.2, "speaker": "S1"},
+    {"start_s": 36.1, "speaker": "S2"},
+    {"start_s": 47.8, "speaker": "S1"},
+    {"start_s": 57.7, "speaker": "S2"}
+  ]
+}

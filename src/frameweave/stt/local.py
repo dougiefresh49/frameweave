@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from frameweave.types import Segment, Usage, Word
 
-from .audio import duration
-from .base import SttResult, SttTimeout, clamp_to_words
+from .audio import Chunk, duration
+from .base import SttResult, SttTimeout, clamp_to_words, merge_chunks
 
 if TYPE_CHECKING:
     from frameweave.config import Check, Config, FlagSpec
@@ -29,7 +29,10 @@ class WhisperXBackend:
 
     name: ClassVar[str] = _SOURCE
 
-    def __init__(self, diarize: Callable[[dict[str, Any], Any], dict[str, Any]] | None = None):
+    def __init__(
+        self,
+        diarize: Callable[[Path, list[Segment]], list[Segment]] | None = None,
+    ):
         self.diarize = diarize
         self._model: Any = None
         self._model_key: tuple[str, str, str] | None = None
@@ -52,6 +55,17 @@ class WhisperXBackend:
             return self._transcribe(audio, config, started)
         finally:
             self._elapsed_s += time.monotonic() - started
+
+    def merge_and_diarize(
+        self,
+        audio: Path,
+        chunk_results: list[tuple[Chunk, SttResult]],
+    ) -> list[Segment]:
+        """Merge chunk transcripts, then diarize once against the full audio file."""
+        segments = merge_chunks(chunk_results)
+        if self.diarize is None:
+            return segments
+        return self.diarize(audio, segments)
 
     def _transcribe(self, audio: Path, config: Config, started: float) -> SttResult:
         audio_seconds = duration(audio, timeout_s=config.timeout_s)
@@ -92,8 +106,6 @@ class WhisperXBackend:
                 device,
                 return_char_alignments=False,
             )
-            if config.speakers and self.diarize is not None:
-                aligned = self.diarize(aligned, samples)
             segments, dropped_words = _segments(aligned.get("segments", []))
             segments = clamp_to_words(segments)
         else:
