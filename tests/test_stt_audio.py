@@ -1,4 +1,4 @@
-"""Audio tests use speech synthesized at test time; no media fixture is committed."""
+"""Audio tests generate fixed-length wavs at test time; no media fixture is committed."""
 
 from __future__ import annotations
 
@@ -12,6 +12,10 @@ import pytest
 
 from frameweave.stt.audio import SttError, chunk, duration, extract
 
+# Fixed chunking constants so offsets never depend on runner clip length.
+_CHUNK_S = 12.0
+_OVERLAP_S = 2.0
+
 
 def _spoken_clip(tmp_path: Path) -> Path:
     if shutil.which("say") is None:
@@ -22,6 +26,34 @@ def _spoken_clip(tmp_path: Path) -> Path:
         check=True,
     )
     return extract(source, tmp_path / "extracted")
+
+
+def _tone_clip(tmp_path: Path, *, duration_s: float, name: str = "tone.wav") -> Path:
+    """Write a fixed-length 16 kHz mono PCM wav via ffmpeg lavfi sine."""
+    path = tmp_path / name
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={duration_s}",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(path),
+        ],
+        check=True,
+    )
+    return path
 
 
 def _probe(path: Path) -> dict:
@@ -54,48 +86,28 @@ def test_extract_produces_atomic_16khz_mono_pcm(tmp_path: Path) -> None:
 
 
 def test_chunk_offsets_overlap_and_rejoin_two_copies(tmp_path: Path) -> None:
-    audio = _spoken_clip(tmp_path)
-    clip_s = duration(audio)
-    doubled = tmp_path / "double.wav"
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-i",
-            str(audio),
-            "-i",
-            str(audio),
-            "-filter_complex",
-            "[0:a][1:a]concat=n=2:v=0:a=1",
-            "-c:a",
-            "pcm_s16le",
-            str(doubled),
-        ],
-        check=True,
+    audio = _tone_clip(tmp_path, duration_s=30.0)
+    step = _CHUNK_S - _OVERLAP_S
+
+    chunks = chunk(
+        audio, tmp_path / "work", chunk_s=_CHUNK_S, overlap_s=_OVERLAP_S
     )
-    chunk_s = clip_s + 0.2
-    overlap_s = 0.4
 
-    chunks = chunk(doubled, tmp_path / "work", chunk_s=chunk_s, overlap_s=overlap_s)
-
-    assert len(chunks) == 2
-    assert chunks[0].path.name == "000.wav"
+    assert len(chunks) == 3
+    assert [item.path.name for item in chunks] == ["000.wav", "001.wav", "002.wav"]
     assert chunks[0].offset_s == 0
-    assert chunks[0].duration_s == pytest.approx(chunk_s)
-    assert chunks[1].path.name == "001.wav"
-    assert chunks[1].offset_s == pytest.approx(chunk_s - overlap_s)
-    assert chunks[1].duration_s == pytest.approx(duration(doubled) - chunks[1].offset_s)
+    assert chunks[0].duration_s == pytest.approx(_CHUNK_S)
+    assert chunks[1].offset_s == pytest.approx(step)
+    assert chunks[1].duration_s == pytest.approx(_CHUNK_S)
+    assert chunks[2].offset_s == pytest.approx(2 * step)
+    assert chunks[2].duration_s == pytest.approx(duration(audio) - chunks[2].offset_s)
     assert all(item.path.is_file() for item in chunks)
 
 
 def test_short_audio_yields_one_chunk_at_zero(tmp_path: Path) -> None:
-    audio = _spoken_clip(tmp_path)
+    audio = _tone_clip(tmp_path, duration_s=5.0, name="short.wav")
 
-    chunks = chunk(audio, tmp_path / "work", chunk_s=duration(audio) + 1)
+    chunks = chunk(audio, tmp_path / "work", chunk_s=_CHUNK_S, overlap_s=_OVERLAP_S)
 
     assert len(chunks) == 1
     assert chunks[0].offset_s == 0
