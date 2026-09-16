@@ -59,3 +59,5 @@ Time-valued strings (`timeout_s`, `frame_interval_s`) parse through `util.timeco
 ## Seams
 
 `cli_flags()` and `preflight_checks(config)` are consumed by issues #15 and #5. `FlagSpec` and `Check` live in `config.py` until `types.py` re-homes them. Preflight rows: output root set and writable; cache dir creatable and writable.
+
+Near-duplicate suppression (`keep_duplicates`) depends on pillow, which is a core dependency; the `dedupe` extras group only adds `imagehash` for future perceptual hashes.
