@@ -3,6 +3,9 @@
 ``responses`` is consumed in order. Each item is one of:
 ``("retry", retry_after)``, ``("ok", value)``, ``("fail",)``, ``("timeout",)``.
 ``retry_after`` is seconds or ``None``.
+
+Pipeline fakes (``FakeSource``, ``FakeStt``, ``FakeVision``) live in
+``tests.fakes.pipeline``.
 """
 
 from __future__ import annotations
