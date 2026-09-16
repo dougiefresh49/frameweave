@@ -51,7 +51,7 @@ def extract_json(text):
 
 
 def run_codex(model, effort, images):
-    cmd = ["codex", "exec", "--sandbox", "read-only", "-m", model, "-c", f'model_reasoning_effort="{effort}"']
+    cmd = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "-m", model, "-c", f'model_reasoning_effort="{effort}"']
     for im in images:
         cmd += ["-i", str(im)]
     cmd += ["--", PROMPT.format(n=len(images))]
@@ -65,12 +65,21 @@ def run_codex(model, effort, images):
     return dict(seconds=secs, tokens_total=tokens, raw=p.stdout, err=p.stderr[-2000:], rc=p.returncode)
 
 
-def run_claude(model, images):
+def run_claude(model, images, bare=False):
     paths = "\n".join(str(im) for im in images)
     prompt = f"Read these image file(s) with the Read tool, in order:\n{paths}\n\nThen: " + PROMPT.format(n=len(images))
-    cmd = ["claude", "-p", "--model", model, "--allowedTools", "Read", "--output-format", "json", prompt]
+    cmd = ["claude", "-p", "--model", model, "--allowedTools", "Read", "--output-format", "json"]
+    cwd = None
+    if bare:
+        # strip the fixed context: no CLAUDE.md dirs, no MCP servers, no skills, a one-line system prompt
+        cwd = str(Path(images[0]).parent)  # run inside the frames dir; no CLAUDE.md there
+        cmd += ["--strict-mcp-config", "--mcp-config", "/tmp/frameweave-briefs/empty/mcp.json",
+                "--disable-slash-commands", "--setting-sources", "", "--tools", "Read",
+                "--add-dir", str(Path(images[0]).parent),
+                "--system-prompt", "You read image files with the Read tool and answer with JSON only."]
+    cmd.append(prompt)
     t = time.time()
-    p = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=600)
+    p = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=600, cwd=cwd)
     secs = time.time() - t
     tokens_in = tokens_out = cost = None
     raw = p.stdout
@@ -126,6 +135,8 @@ def main():
                     r = run_codex(model, a.effort, group)
                 elif kind == "claude":
                     r = run_claude(model, group)
+                elif kind == "claude-bare":
+                    r = run_claude(model, group, bare=True)
                 elif kind == "gemini":
                     r = run_gemini(model, group)
                 else:
