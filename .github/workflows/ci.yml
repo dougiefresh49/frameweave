@@ -26,7 +26,7 @@ jobs:
           ffmpeg -version | head -1
 
       - name: Sync
-        run: uv sync --group dev
+        run: uv sync --group dev --extra dedupe
 
       - name: Ruff
         run: uv run ruff check

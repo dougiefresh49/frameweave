@@ -411,6 +411,7 @@ def test_cli_flags() -> None:
         "--speakers",
         "--timeout",
         "--glossary",
+        "--keep-duplicates",
     }
     assert by_name["--vision"].dest == "vision_lane"
     assert by_name["--out"].type is Path
