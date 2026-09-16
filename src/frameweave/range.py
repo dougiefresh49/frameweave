@@ -50,15 +50,21 @@ def parse(
     chapter: str | None,
     url_t: float | None,
     resolved: Resolved,
+    *,
+    defer_bounds: bool = False,
 ) -> RangeSpec:
-    """Build a ``RangeSpec`` from flags, chapter text, or a URL timestamp."""
+    """Build a ``RangeSpec`` from flags, chapter text, or a URL timestamp.
+
+    When ``defer_bounds`` is true (duration not yet known), skip checks that
+    need a real duration; the caller must re-parse after duration is final.
+    """
     duration = float(resolved.duration)
     if start is not None or end is not None:
-        return _from_flags(start, end, duration)
+        return _from_flags(start, end, duration, defer_bounds=defer_bounds)
     if chapter is not None and chapter.strip() != "":
-        return _from_chapter(chapter, resolved, duration)
+        return _from_chapter(chapter, resolved, duration, defer_bounds=defer_bounds)
     if url_t is not None:
-        return _from_url_t(url_t, duration)
+        return _from_url_t(url_t, duration, defer_bounds=defer_bounds)
     return RangeSpec(start=0.0, end=duration, label="full", slug="", source="full")
 
 
@@ -113,25 +119,39 @@ def preflight_checks(config: object) -> list:
     return []
 
 
-def _from_flags(start: str | None, end: str | None, duration: float) -> RangeSpec:
+def _from_flags(
+    start: str | None,
+    end: str | None,
+    duration: float,
+    *,
+    defer_bounds: bool = False,
+) -> RangeSpec:
     start_s = timecode.parse(start) if start is not None and start.strip() != "" else 0.0
     end_s = timecode.parse(end) if end is not None and end.strip() != "" else duration
-    _validate_bounds(start_s, end_s, duration)
+    _validate_bounds(start_s, end_s, duration, defer_bounds=defer_bounds)
     label = f"{_clock(start_s)}-{_clock(end_s)}"
     slug = f"{_clock_slug(start_s)}_{_clock_slug(end_s)}"
     return RangeSpec(start=start_s, end=end_s, label=label, slug=slug, source="flags")
 
 
-def _from_url_t(url_t: float, duration: float) -> RangeSpec:
+def _from_url_t(
+    url_t: float, duration: float, *, defer_bounds: bool = False
+) -> RangeSpec:
     start_s = float(url_t)
     end_s = duration
-    _validate_bounds(start_s, end_s, duration)
+    _validate_bounds(start_s, end_s, duration, defer_bounds=defer_bounds)
     label = f"{_clock(start_s)}-{_clock(end_s)}"
     slug = f"{_clock_slug(start_s)}_{_clock_slug(end_s)}"
     return RangeSpec(start=start_s, end=end_s, label=label, slug=slug, source="url")
 
 
-def _from_chapter(chapter: str, resolved: Resolved, duration: float) -> RangeSpec:
+def _from_chapter(
+    chapter: str,
+    resolved: Resolved,
+    duration: float,
+    *,
+    defer_bounds: bool = False,
+) -> RangeSpec:
     needle = _collapse(chapter).lower()
     chapters = list(resolved.chapters)
     if not chapters:
@@ -159,7 +179,7 @@ def _from_chapter(chapter: str, resolved: Resolved, duration: float) -> RangeSpe
         end_s = float(chapters[index + 1].start)
     else:
         end_s = duration
-    _validate_bounds(start_s, end_s, duration)
+    _validate_bounds(start_s, end_s, duration, defer_bounds=defer_bounds)
     return RangeSpec(
         start=start_s,
         end=end_s,
@@ -169,7 +189,18 @@ def _from_chapter(chapter: str, resolved: Resolved, duration: float) -> RangeSpe
     )
 
 
-def _validate_bounds(start: float, end: float, duration: float) -> None:
+def _validate_bounds(
+    start: float, end: float, duration: float, *, defer_bounds: bool = False
+) -> None:
+    if start < 0:
+        raise RangeError(f"start < 0: start={start}")
+    if defer_bounds:
+        # Duration unknown: still reject an explicit start >= end when end is set.
+        if end > 0 and start >= end:
+            raise RangeError(
+                f"start >= end: start={_clock(start)} ({start}), end={_clock(end)} ({end})"
+            )
+        return
     if start >= end:
         raise RangeError(
             f"start >= end: start={_clock(start)} ({start}), end={_clock(end)} ({end})"
@@ -179,15 +210,10 @@ def _validate_bounds(start: float, end: float, duration: float) -> None:
             f"end > duration: end={_clock(end)} ({end}), "
             f"duration={_clock(duration)} ({duration})"
         )
-    if start < 0:
-        raise RangeError(f"start < 0: start={start}")
 
 
 def _parse_t_value(text: str) -> float:
     bare = text
-    if bare.endswith("s") and bare[:-1].replace(".", "", 1).isdigit():
-        # ``90s`` → bare seconds with a trailing s (also matched by compound).
-        pass
     match = _YT_COMPOUND.fullmatch(bare)
     if match and any(match.group(name) for name in ("h", "m", "s")):
         hours = int(match.group("h") or 0)

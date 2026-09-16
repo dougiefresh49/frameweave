@@ -290,6 +290,21 @@ def _cmd_run(
     frames_only = bool(getattr(args, "frames_only", False))
     redo = getattr(args, "redo", None) or ()
 
+    from frameweave.range import parse as parse_range
+    from frameweave.range import url_t_from
+
+    start = getattr(args, "start", None)
+    end = getattr(args, "end", None)
+    chapter = getattr(args, "chapter", None)
+    url_t = url_t_from(args.input)
+    defer = float(resolved.duration) <= 0.0 and callable(
+        getattr(source, "resolved_after_fetch", None)
+    )
+    range_spec = parse_range(
+        start, end, chapter, url_t, resolved, defer_bounds=defer
+    )
+    range_label = range_spec.label
+
     printed_estimate = False
 
     def progress(msg: str) -> None:
@@ -304,11 +319,9 @@ def _cmd_run(
         if not quiet:
             print(msg, file=out)
         if msg.startswith("stage frames:"):
-            _print_frames_line(config, resolved.video_id, out)
+            _print_frames_line(config, resolved.video_id, out, range_label=range_label)
 
     try:
-        from frameweave.range import url_t_from
-
         outcome = pipeline.run(
             args.input,
             config,
@@ -320,10 +333,10 @@ def _cmd_run(
             vision=backends.get("vision") if backends else None,
             out_override=out_override,
             resolved=resolved,
-            start=getattr(args, "start", None),
-            end=getattr(args, "end", None),
-            chapter=getattr(args, "chapter", None),
-            url_t=url_t_from(args.input),
+            start=start,
+            end=end,
+            chapter=chapter,
+            url_t=url_t,
         )
     except Exception as exc:
         return _handle_error(exc, bool(getattr(args, "debug", False)), err)
@@ -415,11 +428,13 @@ def _print_estimate(resolved: Resolved, config: Config, out: TextIO) -> None:
         print("dollars (est): $0 (subscription)", file=out)
 
 
-def _print_frames_line(config: Config, video_id: str, out: TextIO) -> None:
+def _print_frames_line(
+    config: Config, video_id: str, out: TextIO, *, range_label: str = "full"
+) -> None:
     # Match the pipeline's run key (auto → claude until #26).
     keyed = config if config.vision_lane != "auto" else replace(config, vision_lane="claude")
     try:
-        key = make_run_key(keyed, "full")
+        key = make_run_key(keyed, range_label)
     except ConfigError:
         return
     path = Path(config.cache_dir) / "runs" / video_id / key / "frames.json"

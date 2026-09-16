@@ -114,6 +114,7 @@ class RunContext:
     range_chapter: str | None = None
     range_url_t: float | None = None
     range_locked: bool = False
+    range_deferred: bool = False
 
 
 @dataclass(frozen=True)
@@ -190,8 +191,19 @@ def run(
     source_dir = Path(config.cache_dir) / "sources" / resolved.video_id
     source_dir.mkdir(parents=True, exist_ok=True)
     locked = range_spec is not None
-    rs = range_spec or parse_range(start, end, chapter, url_t, resolved)
-    key = make_run_key(config, rs.label)
+    deferred = (
+        not locked
+        and float(resolved.duration) <= 0.0
+        and callable(getattr(picked, "resolved_after_fetch", None))
+    )
+    rs = range_spec or parse_range(
+        start, end, chapter, url_t, resolved, defer_bounds=deferred
+    )
+    if deferred:
+        # Key and run dir wait until duration is known (post-fetch refresh).
+        key = "_pending_range"
+    else:
+        key = make_run_key(config, rs.label)
     run_dir = Path(config.cache_dir) / "runs" / resolved.video_id / key
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -217,6 +229,7 @@ def run(
         range_chapter=None if locked else chapter,
         range_url_t=None if locked else url_t,
         range_locked=locked,
+        range_deferred=deferred,
     )
 
     _install_handlers(ctx)
@@ -351,13 +364,29 @@ def _refresh_range(ctx: RunContext) -> None:
     """Recompute the range after resolved duration/chapters become final."""
     if ctx.range_locked or ctx.resolved is None:
         return
+    still_unknown = ctx.range_deferred and float(ctx.resolved.duration) <= 0.0
     ctx.range_spec = parse_range(
         ctx.range_start,
         ctx.range_end,
         ctx.range_chapter,
         ctx.range_url_t,
         ctx.resolved,
+        defer_bounds=still_unknown,
     )
+    if ctx.range_deferred and float(ctx.resolved.duration) > 0.0:
+        _bind_run_placement(ctx)
+        ctx.range_deferred = False
+
+
+def _bind_run_placement(ctx: RunContext) -> None:
+    """Set run key and directory from the finalized range label."""
+    assert ctx.resolved is not None
+    key = make_run_key(ctx.config, ctx.range_spec.label)
+    run_dir = Path(ctx.config.cache_dir) / "runs" / ctx.resolved.video_id / key
+    run_dir.mkdir(parents=True, exist_ok=True)
+    ctx.run_key = key
+    ctx.run_dir = run_dir
+    ctx.ledger = Ledger(run_dir)
 
 
 def _write_skip_stub(ctx: RunContext, stage: Stage) -> StageResult:

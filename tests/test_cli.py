@@ -370,6 +370,52 @@ def test_frames_line_uses_current_run_key(tmp_path: Path) -> None:
     assert f"frames: {len(frames)} primary {primary} extra {extra}" in text
 
 
+def test_frames_line_uses_range_label(tmp_path: Path) -> None:
+    """Range runs key frames.json by the range label, not hardcoded full."""
+    video = _video(tmp_path)
+    kwargs = _load_kwargs(tmp_path)
+    buf = io.StringIO()
+    code = main(
+        [
+            "run",
+            str(video),
+            "--start",
+            "5",
+            "--end",
+            "10",
+            "--out",
+            str(tmp_path / "range-frames"),
+        ],
+        backends={
+            "source": FakeSource(video=video),
+            "stt": FakeStt(),
+            "vision": FakeVision(),
+        },
+        stdout=buf,
+        **kwargs,
+    )
+    assert code == 0
+    text = buf.getvalue()
+    assert "frames:" in text
+
+    from dataclasses import replace
+
+    from frameweave.config import load
+    from frameweave.config import run_key as make_run_key
+
+    cfg = load(flags={}, **kwargs)
+    keyed = cfg if cfg.vision_lane != "auto" else replace(cfg, vision_lane="claude")
+    cache = Path(kwargs["env"]["FRAMEWEAVE_CACHE_DIR"])
+    source = FakeSource(video=video)
+    video_id = source.resolve(str(video)).video_id
+    key = make_run_key(keyed, "00:00:05-00:00:10")
+    assert (cache / "runs" / video_id / key / "frames.json").is_file()
+    # Hardcoded "full" would miss this file and omit the frames line.
+    full_key = make_run_key(keyed, "full")
+    assert full_key != key
+    assert not (cache / "runs" / video_id / full_key / "frames.json").is_file()
+
+
 def test_flags_dict_passes_config_dests() -> None:
     """Finding 6: every non-CLI dest is passed; load rejects unknowns."""
     import argparse

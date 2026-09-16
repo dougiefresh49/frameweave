@@ -233,8 +233,10 @@ def test_range_run_filters_segments_frames_and_output_slug(tmp_path: Path) -> No
     stt = FakeStt(
         segments=[
             Segment(0.0, 4.0, "before window", "stt-fake", id="s0001"),
-            Segment(5.0, 9.0, "inside window", "stt-fake", id="s0002"),
-            Segment(12.0, 16.0, "after window", "stt-fake", id="s0003"),
+            Segment(3.0, 6.0, "straddle start", "stt-fake", id="s0002"),
+            Segment(5.0, 9.0, "inside window", "stt-fake", id="s0003"),
+            Segment(9.0, 13.0, "straddle end", "stt-fake", id="s0004"),
+            Segment(12.0, 16.0, "after window", "stt-fake", id="s0005"),
         ]
     )
     vision = FakeVision()
@@ -255,15 +257,102 @@ def test_range_run_filters_segments_frames_and_output_slug(tmp_path: Path) -> No
     run_dirs = [p for p in run_dir.rglob("transcript.json")]
     assert len(run_dirs) == 1
     data = json.loads(run_dirs[0].read_text(encoding="utf-8"))
-    texts = [seg["text"] for seg in data["segments"]]
-    assert texts == ["inside window"]
+    kept = data["segments"]
+    assert [seg["text"] for seg in kept] == [
+        "straddle start",
+        "inside window",
+        "straddle end",
+    ]
+    # Boundary-straddling segments keep absolute times.
+    assert (kept[0]["start"], kept[0]["end"]) == (3.0, 6.0)
+    assert (kept[2]["start"], kept[2]["end"]) == (9.0, 13.0)
 
     frames = json.loads(run_dirs[0].with_name("frames.json").read_text(encoding="utf-8"))
+    assert frames["interval_s"] == 15.0
     for frame in frames["frames"]:
         assert 5.0 <= frame["time"] < 10.0
 
     header = (outcome.output_path / "transcript.fwv").read_text(encoding="utf-8")
     assert "range: 00:00:05-00:00:10" in header
+
+    # Same range at 5 s interval gets a different run key.
+    (tmp_path / "out5").mkdir(exist_ok=True)
+    (tmp_path / "cache5").mkdir(exist_ok=True)
+    cfg5 = load(
+        flags={
+            "out": tmp_path / "out5",
+            "cache_dir": tmp_path / "cache5",
+            "vision_lane": "none",
+            "frames_per_call": 2,
+            "frame_interval_s": 5.0,
+            "captions_mode": "none",
+        },
+        env={},
+        toml_path=MISSING_TOML,
+        dotenv_paths=[],
+    )
+    outcome5 = run(
+        str(video),
+        cfg5,
+        source=FakeSource(video=video),
+        stt=FakeStt(segments=list(stt.segments)),
+        vision=FakeVision(),
+        start="5",
+        end="10",
+    )
+    assert outcome5.run_key != outcome.run_key
+
+
+def test_range_run_through_duration_zero_source(tmp_path: Path) -> None:
+    """Http-like sources resolve with duration 0; range must wait for post-fetch."""
+    from dataclasses import replace
+
+    video = tmp_path / "clip.mp4"
+    make_synthetic(video, 20)
+    cfg = _cfg(tmp_path, frame_interval_s=15.0, vision_lane="none")
+
+    class HttpishSource(FakeSource):
+        def resolve(self, raw_input: str) -> Resolved:
+            resolved = super().resolve(raw_input)
+            return replace(resolved, duration=0.0)
+
+        def resolved_after_fetch(self, dest_dir: Path) -> Resolved:
+            del dest_dir
+            assert self.video is not None
+            return Resolved(
+                video_id=self._video_id,
+                title="Synthetic twenty",
+                channel="Test Channel",
+                source=str(self.video.resolve()),
+                duration=20.0,
+                has_captions=False,
+            )
+
+    source = HttpishSource(video=video)
+    stt = FakeStt(
+        segments=[
+            Segment(0.0, 4.0, "before", "stt-fake", id="s0001"),
+            Segment(5.0, 9.0, "inside", "stt-fake", id="s0002"),
+            Segment(12.0, 16.0, "after", "stt-fake", id="s0003"),
+        ]
+    )
+    outcome = run(
+        str(video),
+        cfg,
+        source=source,
+        stt=stt,
+        vision=FakeVision(),
+        start="5",
+        end="10",
+    )
+    assert outcome.output_path.name == "00-00-05_00-00-10"
+    assert outcome.run_key == run_key(cfg, "00:00:05-00:00:10")
+    assert outcome.run_key != "_pending_range"
+
+    transcript = next((Path(cfg.cache_dir) / "runs").rglob("transcript.json"))
+    assert transcript.parent.name == outcome.run_key
+    texts = [s["text"] for s in json.loads(transcript.read_text(encoding="utf-8"))["segments"]]
+    assert texts == ["inside"]
 
 
 def test_output_dir_nests_range_slug(tmp_path: Path) -> None:
