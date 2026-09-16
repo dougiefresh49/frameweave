@@ -888,6 +888,7 @@ def _stage_describe(ctx: RunContext) -> StageResult:
         ctx.config = config
         if choice_dict is not None:
             ctx.lane_choice = choice_dict
+            _atomic_json(ctx.run_dir / "lane_choice.json", choice_dict)
             warning = choice_dict.get("warning")
             if warning and warning not in ctx.warnings:
                 ctx.warnings.append(str(warning))
@@ -1038,10 +1039,11 @@ def _stage_assemble(ctx: RunContext) -> StageResult:
     primary = sum(1 for f in frames if f.kind == "primary")
     extra = sum(1 for f in frames if f.kind == "extra")
     kept_n, dropped_n, kept_label, extra_events = _dedupe_assemble_fields(ctx, len(frames))
+    speaker_count = len({s.speaker for s in segments if s.speaker})
     meta = RunMeta(
         range_spec=rs.header,
         transcript_source=transcript.get("source") or "none",
-        speakers=None,
+        speakers=speaker_count or None,
         vision=vision,
         frame_width=ctx.config.frame_width,
         completion=completion,
@@ -1081,6 +1083,13 @@ def _stage_assemble(ctx: RunContext) -> StageResult:
         cost = {**cost, "lane_actual": ctx.lane_actual}
     write_cost(out, cost)
     meta_dict = json.loads((out / "meta.json").read_text(encoding="utf-8"))
+    if ctx.lane_choice is None:
+        choice_path = ctx.run_dir / "lane_choice.json"
+        if choice_path.is_file():
+            try:
+                ctx.lane_choice = json.loads(choice_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                ctx.lane_choice = None
     if ctx.lane_choice is not None:
         meta_dict["lane_choice"] = ctx.lane_choice
         _atomic_json(out / "meta.json", meta_dict)

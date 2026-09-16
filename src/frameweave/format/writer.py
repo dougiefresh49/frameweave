@@ -3,13 +3,13 @@
 Atomic publish: each artifact is written to a temp name in ``dest_dir`` and renamed
 into place. Paths cited in the transcript and ``meta.json`` are relative to ``dest_dir``.
 
-Call order for completion: callers that need ``incomplete`` (speech requested, zero
-segments) set ``meta.completion`` / ``meta.completion_reason`` via
-``derive_completion`` before ``write_transcript``. This function appends any
-missing-description warnings, assigns missing ``Segment.id`` values, then calls
-``derive_completion`` again so those warnings are reflected without clobbering an
-already-recorded incomplete run (``speech_requested`` is inferred from a prior
-``incomplete`` status).
+Call order for completion: callers set ``meta.completion`` / ``meta.completion_reason``
+(via ``derive_completion`` or a caller-owned sentinel such as the frames-only
+``"complete (speech not requested)"``) before calling ``write_transcript``, which
+keeps that string as given. The only two exceptions: ``meta.completion is None``
+asks this function to derive it from scratch, and a plain ``"complete"`` is upgraded
+to ``"complete-with-warnings"`` if this function appends a missing-description
+warning that the caller could not have known about yet.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ class RunMeta:
     speakers: int | None
     vision: str
     frame_width: int
-    completion: str
+    completion: str | None
     completion_reason: str | None
     warnings: list[str]
     stats: dict[str, Any]
@@ -127,10 +127,12 @@ def write_transcript(
             warning = f"frame {frame.id} has no description"
             if warning not in meta.warnings:
                 meta.warnings.append(warning)
-    speech_requested = meta.completion == "incomplete"
-    meta.completion, meta.completion_reason = derive_completion(
-        segments, meta.warnings, speech_requested
-    )
+    if meta.completion is None:
+        meta.completion, meta.completion_reason = derive_completion(
+            segments, meta.warnings, speech_requested=True
+        )
+    elif meta.completion == "complete" and meta.warnings:
+        meta.completion, meta.completion_reason = "complete-with-warnings", None
 
     header = _header_lines(
         resolved, frames, meta, extra_headers or {}, header_chapters

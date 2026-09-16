@@ -584,3 +584,28 @@ def test_header_chapters_lists_all_while_body_uses_window(tmp_path: Path) -> Non
     assert "## [00:01:00] Middle" in text
     assert "## [00:00:00] Intro" not in text
     assert "## [00:02:00] Outro" not in text
+
+
+def test_caller_owned_completion_sentinel_survives_write_transcript(tmp_path: Path) -> None:
+    """#71 defect 2: a caller-set sentinel like frames-only's completion string is
+    kept verbatim; write_transcript only derives its own value when given None."""
+    resolved = Resolved(video_id="v", title="t", channel="c", source="/v.mp4", duration=10.0)
+    sentinel = _meta(completion="complete (speech not requested)", completion_reason=None)
+    text = write_transcript(tmp_path, resolved, [], [], [], sentinel).read_text(
+        encoding="utf-8"
+    )
+    assert sentinel.completion == "complete (speech not requested)"
+    assert "completion: complete (speech not requested)" in text
+
+    # completion=None with zero segments: write_transcript derives "incomplete"
+    # itself (speech was implicitly requested; no sentinel was given).
+    derived_incomplete = _meta(completion=None, completion_reason=None, warnings=[])
+    write_transcript(tmp_path, resolved, [], [], [], derived_incomplete)
+    assert derived_incomplete.completion == "incomplete"
+    assert derived_incomplete.completion_reason == INCOMPLETE_NO_SPEECH
+
+    # completion=None with real segments: derives plain "complete".
+    segments = [Segment(0.0, 1.0, "hi", "captions")]
+    derived_complete = _meta(completion=None, completion_reason=None, warnings=[])
+    write_transcript(tmp_path, resolved, segments, [], [], derived_complete)
+    assert derived_complete.completion == "complete"
