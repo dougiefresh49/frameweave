@@ -65,3 +65,11 @@ def test_negative_raises() -> None:
         timecode.parse("-00:00:01")
     with pytest.raises(ValueError, match="negative"):
         timecode.format(-0.1)
+
+
+@pytest.mark.parametrize(
+    "text", ["00:00:nan", "00:00:inf", "01:1e2", "1e2", "nan", "00:1_0", "00:00: 5"]
+)
+def test_non_decimal_seconds_raise(text: str) -> None:
+    with pytest.raises(ValueError):
+        timecode.parse(text)

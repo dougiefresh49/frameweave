@@ -60,10 +60,8 @@ def _nonneg_int(part: str, text: str) -> int:
 
 
 def _nonneg_float(part: str, text: str) -> float:
-    try:
-        value = float(part)
-    except ValueError:
-        raise ValueError(f"invalid timecode: {text!r}") from None
-    if value < 0:
-        raise ValueError(f"negative time: {text!r}")
-    return value
+    # Digits with an optional fraction only: ``float()`` alone would accept
+    # ``nan``, ``inf``, and exponents such as ``1e2`` (Sol review, PR #29).
+    if not _BARE.fullmatch(part):
+        raise ValueError(f"invalid timecode: {text!r}")
+    return float(part)
