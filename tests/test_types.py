@@ -37,10 +37,11 @@ def _roundtrip(obj):
 def test_segment_with_words_round_trips() -> None:
     seg = Segment(
         start=4.0, end=12.4, text="okay so the first feature", source="stt-whisperx",
-        speaker="S1", words=[Word(4.0, 4.3, "okay", 0.98), Word(4.3, 4.5, "so", 0.7)],
+        id="s0001", speaker="S1", words=[Word(4.0, 4.3, "okay", 0.98), Word(4.3, 4.5, "so", 0.7)],
         quality=-0.21,
     )
     assert _roundtrip(seg) == seg
+    assert _roundtrip(seg).id == "s0001"
     assert seg.to_dict()["words"][0] == {"start": 4.0, "end": 4.3, "text": "okay", "score": 0.98}
 
 

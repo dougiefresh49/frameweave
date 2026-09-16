@@ -73,6 +73,7 @@ class Segment(_Record):
     end: float
     text: str
     source: str
+    id: str | None = None  # ``s<dddd>``, assigned by the writer in file order; stable within a run
     speaker: str | None = None
     words: list[Word] | None = None
     quality: float | None = None
