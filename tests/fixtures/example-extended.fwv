@@ -1,0 +1,36 @@
+frameweave 1
+title: Kickoff: features walkthrough
+channel: Local recording
+source: /Users/example/Movies/kickoff.mp4
+duration: 00:33:00
+range: 00:04:00-00:09:00
+transcript-source: stt-whisperx
+speakers: 2
+vision: codex:gpt-5.6-sol standard, 8 per call
+frames: 8 primary 6 extra 2 at 1280px
+completion: complete-with-warnings
+generated: 2026-09-16T18:20:00Z frameweave 0.2.0
+x-experimental: a header key readers must ignore
+
+[00:04:00-00:04:12] said/stt-whisperx: S1: okay so the first feature is the buffer between the two queues
+[00:04:00] seen/codex:gpt-5.6-sol #f0001 frames/f0001-00-04-00.0.jpg: A diagram with two boxes and an arrow.
+  text: "ingest", "buffer", "workers"
+[00:04:12-00:04:20] said/stt-whisperx: S2: and the buffer is bounded or unbounded
+[00:04:12] seen/codex:gpt-5.6-sol #f0002 frames/f0002-00-04-12.0.jpg: Same diagram, the presenter's cursor on the middle box.
+  text: "buffer"
+[00:04:20-00:05:30] said/stt-whisperx: S1: bounded, we cap it at ten thousand and shed load above that, let me show the config
+[00:04:20] seen/codex:gpt-5.6-sol #f0003 frames/f0003-00-04-20.0.jpg: An editor with a yaml file.
+  text: "max_buffer: 10000", "shed: true"
+[00:05:05] seen+/codex:gpt-5.6-sol #f0004 frames/f0004-00-05-05.0.jpg: The same yaml file scrolled down.
+  text: "retry_after_s: 30"
+[00:05:20] seen+/codex:gpt-5.6-sol #f0005 frames/f0005-00-05-20.0.jpg: A terminal running the service.
+  text: illegible
+[00:05:20] note/dedupe: frame f0005 kept; near-duplicate of f0004 dropped (a kind readers must ignore)
+[00:05:30-00:05:41] said/stt-whisperx: S2: got it, and what happens to the shed messages
+[00:05:30] seen/codex:gpt-5.6-sol #f0006 frames/f0006-00-05-30.0.jpg: The presenter on camera.
+  text:
+[00:06:10-00:06:15] said/stt-whisperx: S1: they go to a dead letter topic
+[00:06:10] seen/codex:gpt-5.6-sol #f0007 frames/f0007-00-06-10.0.jpg: A dashboard with a topic list.
+  text: "dead-letter", "3 msgs"
+[00:07:00] seen/codex:gpt-5.6-sol #f0008 frames/f0008-00-07-00.0.jpg: A silent stretch: a loading spinner over the dashboard.
+  text: "Loading"
