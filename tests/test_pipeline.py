@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -25,6 +26,27 @@ from tests.fakes.pipeline import FakeSource, FakeStt, FakeVision
 from tests.make_synthetic import make as make_synthetic
 
 MISSING_TOML = Path("/nonexistent/frameweave-test/config.toml")
+
+
+def _child_vision_env(tmp_path: Path) -> dict[str, str]:
+    """Env for a spawned child where claude/codex vision-lane presence passes.
+
+    A child subprocess is a fresh interpreter: this test's monkeypatched
+    ``shutil.which``/``os.environ`` (the conftest presence fixture) never
+    reaches it, so on a runner with no real `claude`/`codex` CLI the child's
+    own presence check fails. Give it stub executables on `PATH` (prepended,
+    so real tools like ffmpeg/yt-dlp still resolve) and a `GEMINI_API_KEY`.
+    """
+    bin_dir = tmp_path / "stub-bin"
+    bin_dir.mkdir(exist_ok=True)
+    for name in ("claude", "codex"):
+        stub = bin_dir / name
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    env["GEMINI_API_KEY"] = "test-key"
+    return env
 
 
 def _cfg(tmp_path: Path, **flags: object):
@@ -661,7 +683,9 @@ def test_sigint_subprocess_reconciles_and_clears_temps(tmp_path: Path) -> None:
             time.sleep(0.05)
         """
     )
-    proc = subprocess.Popen([sys.executable, "-c", code])
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code], env=_child_vision_env(tmp_path)
+    )
     try:
         for _ in range(200):
             if ready.is_file():
@@ -789,6 +813,7 @@ def test_signal_during_describe_stops_within_one_batch(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=_child_vision_env(tmp_path),
     )
     stderr_text = ""
     try:
@@ -1023,3 +1048,70 @@ def test_direct_url_captions_are_note_not_warning(tmp_path: Path) -> None:
     meta = json.loads((outcome.output_path / "meta.json").read_text(encoding="utf-8"))
     assert meta["stats"]["captions"] == "not applicable (direct URL)"
     assert meta["warnings"] == []
+
+
+def test_explicit_gemini_without_key_fails_before_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #66: an unavailable explicit lane raises before stage 1 downloads anything."""
+    from frameweave.vision.choose import NoVisionLane
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path, vision_lane="gemini")
+    source = FakeSource(video=video)
+    with pytest.raises(NoVisionLane) as excinfo:
+        run(
+            str(video),
+            cfg,
+            source=source,
+            stt=FakeStt(),
+            vision=FakeVision(),
+        )
+    assert "GEMINI_API_KEY not set" in str(excinfo.value)
+    assert source.fetch_calls == 0  # nothing downloaded
+
+
+def test_auto_raises_before_fetch_when_no_lane_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #66: auto with every candidate unavailable fails before stage 1."""
+    from frameweave.vision.choose import NoVisionLane
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    video = _video(tmp_path)
+    cfg = _cfg(
+        tmp_path,
+        vision_lane="auto",
+        usage_snapshot=tmp_path / "missing-snapshot.json",
+        usage_refresh_script=tmp_path / "missing-refresh.sh",
+    )
+    source = FakeSource(video=video)
+    with pytest.raises(NoVisionLane):
+        run(
+            str(video),
+            cfg,
+            source=source,
+            stt=FakeStt(),
+            vision=FakeVision(),
+        )
+    assert source.fetch_calls == 0
+
+
+def test_explicit_lane_with_injected_backend_runs_without_real_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #66 fix: an injected backend makes the real claude CLI's absence moot."""
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path, vision_lane="claude")
+    outcome = run(
+        str(video),
+        cfg,
+        source=FakeSource(video=video),
+        stt=FakeStt(),
+        vision=FakeVision(),
+    )
+    assert outcome.completion == "complete"
+    assert outcome.vision_lane == "claude"
