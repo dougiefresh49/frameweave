@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import signal
 import subprocess
 import tempfile
 import time
@@ -34,6 +35,15 @@ if TYPE_CHECKING:
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Lane = Literal["claude", "codex"]
 
+# Child killed by SIGINT/SIGTERM: negative wait status or 128+signum exit.
+_SIGNAL_EXIT = frozenset(
+    {
+        -signal.SIGINT,
+        -signal.SIGTERM,
+        128 + signal.SIGINT,
+        128 + signal.SIGTERM,
+    }
+)
 _QUOTA = re.compile(r"rate[ -]?limit|quota|\b429\b|overloaded", re.IGNORECASE)
 _RETRY_AFTER = re.compile(r"retry-after\s*:?\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
 _TOKENS = re.compile(r"tokens used\s*\n\s*([\d,]+)", re.IGNORECASE)
@@ -103,6 +113,8 @@ class CliBackend:
 
         def classify(value: object) -> Outcome:
             nonlocal bad_replies, last_detail
+            if isinstance(value, KeyboardInterrupt):
+                raise value
             if isinstance(value, subprocess.TimeoutExpired):
                 last_detail = str(value) or "timed out"
                 return Outcome("timeout")
@@ -119,6 +131,11 @@ class CliBackend:
                 return Outcome("fail")
             if result.returncode == 0:
                 return Outcome("ok")
+            if result.returncode in _SIGNAL_EXIT:
+                # Never retry a child killed by SIGINT/SIGTERM; surface as interrupt.
+                if result.returncode in (-signal.SIGTERM, 128 + signal.SIGTERM):
+                    raise SystemExit(143)
+                raise KeyboardInterrupt
             output = f"{result.stdout or ''}\n{result.stderr or ''}"
             last_detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
             if _QUOTA.search(output):

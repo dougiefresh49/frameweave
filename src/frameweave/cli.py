@@ -119,6 +119,9 @@ def main(
             return _cmd_cache(args, load_kwargs, out)
         if args.command == "lanes":
             return _cmd_lanes(args, load_kwargs, out)
+    except KeyboardInterrupt as exc:
+        print("frameweave: interrupted", file=err)
+        return int(getattr(exc, "exit_code", 130))
     except Exception as exc:
         return _handle_error(exc, getattr(args, "debug", False), err)
 
