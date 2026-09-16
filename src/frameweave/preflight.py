@@ -68,11 +68,16 @@ def collect(
     env: Mapping[str, str] | None = None,
     which: WhichFn = shutil.which,
     run: RunFn = subprocess.run,
+    modules: Sequence[str] | None = None,
 ) -> list[Check]:
-    """Import every MODULES entry and merge its preflight_checks; missing modules skip."""
+    """Import every MODULES entry and merge its preflight_checks; missing modules skip.
+
+    Pass `modules` to restrict which entries are collected (tests use this so real
+    module rows cannot override builtins or call the machine's which/run).
+    """
     process_env: Mapping[str, str] = os.environ if env is None else env
     by_name: dict[str, Check] = {}
-    for modname in MODULES:
+    for modname in MODULES if modules is None else modules:
         try:
             if modname == "frameweave.preflight":
                 checks = _builtin_checks(
@@ -140,9 +145,10 @@ def run_doctor(
     which: WhichFn = shutil.which,
     run: RunFn = subprocess.run,
     out: TextIO,
+    modules: Sequence[str] | None = None,
 ) -> int:
     """Print one row per check and return `exit_code(rows)`."""
-    rows = collect(config, env=env, which=which, run=run)
+    rows = collect(config, env=env, which=which, run=run, modules=modules)
     failed = 0
     warnings = 0
     for row in rows:

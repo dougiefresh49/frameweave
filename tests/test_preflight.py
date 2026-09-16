@@ -16,6 +16,10 @@ from frameweave.config import Check, ConfigError, load, require_out
 
 MISSING_TOML = Path("/nonexistent/frameweave-test/config.toml")
 
+# Tests must not collect real modules (stt/frames/vision/sources override builtins
+# with live which/run). Default scope: builtins + config's out/cache rows.
+DOCTOR_MODULES = ("frameweave.preflight", "frameweave.config")
+
 
 def missing_out_message(config) -> str:
     try:
@@ -88,7 +92,9 @@ def test_collect_skips_missing_modules(happy_which, happy_run, tmp_path: Path) -
     cfg = load_cfg(flags={"out": out, "cache_dir": cache, "vision_lane": "none"})
     rows = {
         row.name: row
-        for row in preflight.collect(cfg, env={}, which=happy_which, run=happy_run)
+        for row in preflight.collect(
+            cfg, env={}, which=happy_which, run=happy_run, modules=DOCTOR_MODULES
+        )
     }
     assert "ffmpeg" in rows
     assert rows["ffmpeg"].ok is True
@@ -117,7 +123,13 @@ def test_fake_module_injected(
 
     rows = {
         row.name: row
-        for row in preflight.collect(cfg, env={}, which=happy_which, run=happy_run)
+        for row in preflight.collect(
+            cfg,
+            env={},
+            which=happy_which,
+            run=happy_run,
+            modules=(*DOCTOR_MODULES, "frameweave.frames"),
+        )
     }
     assert rows["frames-extra"].detail == "from fake"
 
@@ -140,7 +152,13 @@ def test_module_that_raises(
 
     rows = {
         row.name: row
-        for row in preflight.collect(cfg, env={}, which=happy_which, run=happy_run)
+        for row in preflight.collect(
+            cfg,
+            env={},
+            which=happy_which,
+            run=happy_run,
+            modules=(*DOCTOR_MODULES, "frameweave.captions"),
+        )
     }
     assert rows["frameweave.captions"].ok is False
     assert "captions exploded" in rows["frameweave.captions"].detail
@@ -168,7 +186,13 @@ def test_nested_missing_import_is_failed_row(
 
     rows = {
         row.name: row
-        for row in preflight.collect(cfg, env={}, which=happy_which, run=happy_run)
+        for row in preflight.collect(
+            cfg,
+            env={},
+            which=happy_which,
+            run=happy_run,
+            modules=(*DOCTOR_MODULES, "frameweave.stt.local"),
+        )
     }
     assert rows["frameweave.stt.local"].ok is False
     assert "whisperx" in rows["frameweave.stt.local"].detail
@@ -195,7 +219,13 @@ def test_dedupe_module_wins_over_builtin(
 
     rows = {
         row.name: row
-        for row in preflight.collect(cfg, env={}, which=happy_which, run=happy_run)
+        for row in preflight.collect(
+            cfg,
+            env={},
+            which=happy_which,
+            run=happy_run,
+            modules=(*DOCTOR_MODULES, "frameweave.sources.local"),
+        )
     }
     assert rows["ffmpeg"].detail == "module ffmpeg"
     assert rows["ffmpeg"].remedy == "from module"
@@ -205,7 +235,11 @@ def test_missing_out_still_runs_other_rows(happy_which, happy_run, tmp_path: Pat
     cache = tmp_path / "cache"
     cfg = load_cfg(flags={"cache_dir": cache, "vision_lane": "none"})
     expected = missing_out_message(cfg)
-    rows = list(preflight.collect(cfg, env={}, which=happy_which, run=happy_run))
+    rows = list(
+        preflight.collect(
+            cfg, env={}, which=happy_which, run=happy_run, modules=DOCTOR_MODULES
+        )
+    )
     by_name = {row.name: row for row in rows}
     assert by_name["output root"].ok is False
     assert by_name["output root"].detail == expected
@@ -237,6 +271,7 @@ def test_exit_code_matches_summary_not_print_text(happy_which, happy_run, tmp_pa
         which=which_map({"ffmpeg": None, "ffprobe": "/bin/ffprobe"}),
         run=happy_run,
         out=buf,
+        modules=DOCTOR_MODULES,
     )
     text = buf.getvalue()
     assert code == 1
@@ -250,7 +285,13 @@ def test_as_json_round_trip(happy_which, happy_run, tmp_path: Path) -> None:
     out.mkdir()
     cache = tmp_path / "cache"
     cfg = load_cfg(flags={"out": out, "cache_dir": cache, "vision_lane": "none"})
-    rows = preflight.collect(cfg, env={"GEMINI_API_KEY": "x"}, which=happy_which, run=happy_run)
+    rows = preflight.collect(
+        cfg,
+        env={"GEMINI_API_KEY": "x"},
+        which=happy_which,
+        run=happy_run,
+        modules=DOCTOR_MODULES,
+    )
     payload = json.loads(preflight.as_json(rows))
     assert isinstance(payload, list)
     assert {item["name"] for item in payload} == {row.name for row in rows}
@@ -282,7 +323,11 @@ def test_disk_warning_never_flips_exit(
 
     rows = list(
         preflight.collect(
-            cfg, env={"GEMINI_API_KEY": "x"}, which=happy_which, run=happy_run
+            cfg,
+            env={"GEMINI_API_KEY": "x"},
+            which=happy_which,
+            run=happy_run,
+            modules=DOCTOR_MODULES,
         )
     )
     by_name = {row.name: row for row in rows}
@@ -300,6 +345,7 @@ def test_disk_warning_never_flips_exit(
         which=happy_which,
         run=happy_run,
         out=buf,
+        modules=DOCTOR_MODULES,
     )
     text = buf.getvalue()
     assert "warn disk" in text
@@ -314,7 +360,9 @@ def test_gemini_key_required_only_for_gemini_lane(happy_which, happy_run, tmp_pa
     cfg = load_cfg(flags={"out": out, "cache_dir": cache, "vision_lane": "gemini"})
     rows = {
         row.name: row
-        for row in preflight.collect(cfg, env={}, which=happy_which, run=happy_run)
+        for row in preflight.collect(
+            cfg, env={}, which=happy_which, run=happy_run, modules=DOCTOR_MODULES
+        )
     }
     assert rows["GEMINI_API_KEY"].required is True
     assert rows["GEMINI_API_KEY"].ok is False
@@ -322,7 +370,9 @@ def test_gemini_key_required_only_for_gemini_lane(happy_which, happy_run, tmp_pa
     cfg2 = load_cfg(flags={"out": out, "cache_dir": cache, "vision_lane": "none"})
     rows2 = {
         row.name: row
-        for row in preflight.collect(cfg2, env={}, which=happy_which, run=happy_run)
+        for row in preflight.collect(
+            cfg2, env={}, which=happy_which, run=happy_run, modules=DOCTOR_MODULES
+        )
     }
     assert rows2["GEMINI_API_KEY"].required is False
 
@@ -334,10 +384,42 @@ def test_hf_token_required_when_speakers(happy_which, happy_run, tmp_path: Path)
     cfg = load_cfg(flags={"out": out, "cache_dir": cache, "vision_lane": "none", "speakers": True})
     rows = {
         row.name: row
-        for row in preflight.collect(cfg, env={}, which=happy_which, run=happy_run)
+        for row in preflight.collect(
+            cfg, env={}, which=happy_which, run=happy_run, modules=DOCTOR_MODULES
+        )
     }
     assert rows["HF_TOKEN"].required is True
     assert rows["HF_TOKEN"].ok is False
+
+
+def test_collect_isolates_which_and_run(happy_which, happy_run, tmp_path: Path) -> None:
+    """With MODULES reduced to fakes, which/run see only built-in binaries."""
+    out = tmp_path / "out"
+    out.mkdir()
+    cache = tmp_path / "cache"
+    cfg = load_cfg(flags={"out": out, "cache_dir": cache, "vision_lane": "none"})
+
+    which_names: list[str] = []
+    run_bins: list[str] = []
+
+    def tracking_which(name: str) -> str | None:
+        which_names.append(name)
+        return happy_which(name)
+
+    def tracking_run(argv, **kwargs):
+        run_bins.append(Path(argv[0]).name)
+        return happy_run(argv, **kwargs)
+
+    preflight.collect(
+        cfg,
+        env={},
+        which=tracking_which,
+        run=tracking_run,
+        modules=DOCTOR_MODULES,
+    )
+
+    assert set(which_names) == {"ffmpeg", "ffprobe"}
+    assert set(run_bins) == {"ffmpeg", "ffprobe"}
 
 
 def test_claude_and_codex_lane_gates(happy_which, happy_run, tmp_path: Path) -> None:
