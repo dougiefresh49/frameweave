@@ -68,6 +68,16 @@ from frameweave.types import (
 )
 from frameweave.util import timecode
 from frameweave.vision.base import VisionBackend, make_backend
+from frameweave.vision.choose import (
+    SUBSCRIPTION_LANES,
+    Plan,
+    choice_to_dict,
+    choose,
+    get_coefficients,
+    lane_actual_from_run,
+    load_snapshot,
+    resolve_usage_paths,
+)
 
 _CONTEXT_CAP = 2000
 
@@ -115,6 +125,9 @@ class RunContext:
     range_url_t: float | None = None
     range_locked: bool = False
     range_deferred: bool = False
+    requested_vision_lane: str = "auto"
+    lane_choice: dict[str, Any] | None = None
+    lane_actual: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +137,7 @@ class RunOutcome:
     cost_usd: float
     run_key: str
     warnings: list[str]
+    vision_lane: str
 
 
 def cli_flags() -> list[FlagSpec]:
@@ -178,7 +192,7 @@ def run(
     """Execute the stage registry and return the assembled output path."""
     progress_fn = progress or _progress_noop
     redo_set = _cascade_redo(set(redo))
-    config = _with_resolved_lane(config)
+    requested_lane = config.vision_lane
     # Fail before any stage spends quota when the output root is missing,
     # unless --out gave an exact folder (out_override).
     if out_override is None:
@@ -188,6 +202,9 @@ def run(
 
     picked = source or _pick_source(raw_input)
     resolved = resolved if resolved is not None else picked.resolve(raw_input)
+    # Resolve auto with an upper-bound plan so run_key has a concrete lane;
+    # describe re-runs choose with the actual frame plan (issue #26).
+    config, early_choice, _early_snap = _with_resolved_lane(config, resolved=resolved)
     source_dir = Path(config.cache_dir) / "sources" / resolved.video_id
     source_dir.mkdir(parents=True, exist_ok=True)
     locked = range_spec is not None
@@ -230,7 +247,11 @@ def run(
         range_url_t=None if locked else url_t,
         range_locked=locked,
         range_deferred=deferred,
+        requested_vision_lane=requested_lane,
+        lane_choice=early_choice,
     )
+    if early_choice and early_choice.get("warning"):
+        ctx.warnings.append(str(early_choice["warning"]))
 
     _install_handlers(ctx)
     try:
@@ -252,6 +273,7 @@ def run(
             cost_usd=ctx.cost_usd,
             run_key=ctx.run_key,
             warnings=list(ctx.warnings),
+            vision_lane=ctx.config.vision_lane,
         )
     finally:
         _clear_handlers()
@@ -472,11 +494,44 @@ def _cascade_redo(redo: set[str]) -> set[str]:
     return set(names[earliest:])
 
 
-def _with_resolved_lane(config: Config) -> Config:
+def _with_resolved_lane(
+    config: Config,
+    *,
+    resolved: Resolved | None = None,
+    frames: int | None = None,
+    transcript_minutes: float | None = None,
+) -> tuple[Config, dict[str, Any] | None, Any]:
+    """Resolve ``auto`` via the usage-aware chooser.
+
+    Returns ``(config, lane_choice dict, snapshot used for the choice)``.
+    """
     if config.vision_lane != "auto":
-        return config
-    # Until #26, auto means claude.
-    return replace(config, vision_lane="claude")
+        return config, None, None
+    if resolved is None:
+        return replace(config, vision_lane="claude"), None, None
+
+    if frames is None:
+        synthetic = [Segment(0.0, resolved.duration, "", "none")]
+        planned = plan_frames(synthetic, resolved.duration, config)
+        frame_count = len(planned.frames)
+        minutes = resolved.duration / 60.0
+    else:
+        frame_count = int(frames)
+        minutes = (
+            float(transcript_minutes)
+            if transcript_minutes is not None
+            else resolved.duration / 60.0
+        )
+
+    snap_path, refresh_script = resolve_usage_paths(config)
+    snapshot = load_snapshot(snap_path, refresh=True, refresh_script=refresh_script)
+    plan = Plan(
+        frames=frame_count,
+        transcript_minutes=minutes,
+        frames_per_call=max(1, int(config.frames_per_call)),
+    )
+    choice = choose(plan, snapshot, get_coefficients(), config, explicit_lane=None)
+    return replace(config, vision_lane=choice.lane), choice_to_dict(choice), snapshot
 
 
 def _prepare_stt(config: Config, stt: SttBackend | None) -> SttBackend | None:
@@ -691,6 +746,31 @@ def _stage_describe(ctx: RunContext) -> StageResult:
     frames = _load_frames(ctx.run_dir / "frames.json")
     transcript = _load_transcript(ctx.run_dir / "transcript.json")
     segments: list[Segment] = transcript["segments"]
+
+    # Issue #26: when the user asked for auto, choose with the actual frame plan.
+    # Use the chooser's snapshot as the before-reading so quota_delta is not empty
+    # when a refresh was needed (stale before-only load would miss the windows).
+    before_snap = None
+    if ctx.requested_vision_lane == "auto":
+        minutes = ctx.resolved.duration / 60.0
+        config, choice_dict, before_snap = _with_resolved_lane(
+            replace(ctx.config, vision_lane="auto"),
+            resolved=ctx.resolved,
+            frames=len(frames),
+            transcript_minutes=minutes,
+        )
+        ctx.config = config
+        if choice_dict is not None:
+            ctx.lane_choice = choice_dict
+            warning = choice_dict.get("warning")
+            if warning and warning not in ctx.warnings:
+                ctx.warnings.append(str(warning))
+    elif ctx.config.vision_lane in SUBSCRIPTION_LANES:
+        snap_path, refresh_script = resolve_usage_paths(ctx.config)
+        before_snap = load_snapshot(
+            snap_path, refresh=False, refresh_script=refresh_script
+        )
+
     lane = ctx.config.vision_lane
     backend = ctx.vision or make_backend(lane, ctx.config)
     model = getattr(backend, "model", ctx.config.vision_model.get(lane, ""))
@@ -740,6 +820,27 @@ def _stage_describe(ctx: RunContext) -> StageResult:
         )
         descriptions.extend(batch_descs)
         total_usage = total_usage + usage
+
+    if lane != "none" and frames:
+        after_snap = None
+        if lane in SUBSCRIPTION_LANES:
+            snap_path, refresh_script = resolve_usage_paths(ctx.config)
+            after_snap = load_snapshot(
+                snap_path, refresh=True, refresh_script=refresh_script
+            )
+        ctx.lane_actual = lane_actual_from_run(
+            lane=lane,
+            frames=len(frames),
+            calls=int(total_usage.calls),
+            tokens=int(
+                total_usage.tokens_in
+                + total_usage.tokens_out
+                + total_usage.tokens_reasoning
+            ),
+            before=before_snap,
+            after=after_snap,
+        )
+        _atomic_json(ctx.run_dir / "lane_actual.json", ctx.lane_actual)
 
     _atomic_json(
         path,
@@ -845,8 +946,20 @@ def _stage_assemble(ctx: RunContext) -> StageResult:
     _restore_chapters_header(out / "transcript.fwv", ctx.resolved)
     write_meta(out, ctx.resolved, frames, meta)
     cost = ctx.ledger.summary()
+    if ctx.lane_actual is None:
+        actual_path = ctx.run_dir / "lane_actual.json"
+        if actual_path.is_file():
+            try:
+                ctx.lane_actual = json.loads(actual_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                ctx.lane_actual = None
+    if ctx.lane_actual is not None:
+        cost = {**cost, "lane_actual": ctx.lane_actual}
     write_cost(out, cost)
     meta_dict = json.loads((out / "meta.json").read_text(encoding="utf-8"))
+    if ctx.lane_choice is not None:
+        meta_dict["lane_choice"] = ctx.lane_choice
+        _atomic_json(out / "meta.json", meta_dict)
     write_readme(out, out / "transcript.fwv", meta_dict, cost)
 
     ctx.output_path = out.resolve()

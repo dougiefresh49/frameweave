@@ -9,20 +9,17 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import math
 import os
 import shutil
 import sys
 import traceback
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, TextIO
 
 from frameweave.config import Config, ConfigError, FlagSpec, load, require_out
 from frameweave.config import run_key as make_run_key
 from frameweave.frames import plan as plan_frames
-from frameweave.ledger import RATES
 from frameweave.preflight import (
     MODULES,
     _dir_size,
@@ -40,13 +37,21 @@ from frameweave.util import timecode
 from frameweave.util.media import NotMediaError
 from frameweave.util.retry import RequestTimeout
 from frameweave.vision import VisionFailed
+from frameweave.vision.choose import (
+    METERED_LANES,
+    SUBSCRIPTION_LANES,
+    Plan,
+    choose,
+    format_projection_table,
+    format_recalibrate_toml,
+    get_coefficients,
+    load_snapshot,
+    recalibrate,
+    resolve_usage_paths,
+)
 
-# Spike token model (decision 48): tokens = calls * 3997 + frames * 2034.
-# #26 moves these into config/lanes.toml.
-_SPIKE_TOKENS_PER_CALL = (3997, 2034)
-_OUTPUT_TOKENS_PER_FRAME = 120
+# Projection coefficients live in the packaged lanes.toml (issue #26).
 _GB = 1024**3
-_SUBSCRIPTION_LANES = frozenset({"claude", "codex"})
 # Dest names that are CLI/pipeline control, not Config fields.
 _CLI_ONLY_DESTS = frozenset(
     {"debug", "dry_run", "doctor_json", "redo", "frames_only", "out", "start", "end", "chapter"}
@@ -112,6 +117,8 @@ def main(
             return _cmd_run(args, load_kwargs, backends, out, err)
         if args.command == "cache":
             return _cmd_cache(args, load_kwargs, out)
+        if args.command == "lanes":
+            return _cmd_lanes(args, load_kwargs, out)
     except Exception as exc:
         return _handle_error(exc, getattr(args, "debug", False), err)
 
@@ -157,6 +164,19 @@ def _build_parser() -> argparse.ArgumentParser:
     cache = sub.add_parser("cache", help="Cache utilities.")
     cache_sub = cache.add_subparsers(dest="cache_command")
     cache_sub.add_parser("size", help="Print the total cache size.")
+
+    lanes = sub.add_parser("lanes", help="Vision lane coefficient helpers.")
+    lanes_sub = lanes.add_subparsers(dest="lanes_command", required=True)
+    recal = lanes_sub.add_parser(
+        "recalibrate",
+        help="Print median coefficients from cost.json files (does not write lanes.toml).",
+    )
+    recal.add_argument(
+        "cost_files",
+        nargs="*",
+        type=Path,
+        help="cost.json paths (default: none; pass files explicitly).",
+    )
 
     return parser
 
@@ -345,7 +365,7 @@ def _cmd_run(
         _print_estimate(resolved, config, out)
 
     print(str(outcome.output_path.resolve()), file=out)
-    print(_format_cost(outcome.cost_usd, config.vision_lane), file=out)
+    print(_format_cost(outcome.cost_usd, outcome.vision_lane), file=out)
 
     if outcome.completion.startswith("incomplete") and not frames_only:
         return 2
@@ -359,6 +379,17 @@ def _cmd_cache(args: argparse.Namespace, load_kwargs: dict[str, Any], out: TextI
     config = load(flags={}, **load_kwargs)
     size = _dir_size(config.cache_dir)
     print(f"cache: {_format_bytes(size)} ({config.cache_dir})", file=out)
+    return 0
+
+
+def _cmd_lanes(args: argparse.Namespace, load_kwargs: dict[str, Any], out: TextIO) -> int:
+    del load_kwargs
+    if getattr(args, "lanes_command", None) != "recalibrate":
+        print("frameweave lanes: only 'recalibrate' is available", file=out)
+        return 1
+    files = [Path(p) for p in (getattr(args, "cost_files", None) or [])]
+    result = recalibrate(files)
+    print(format_recalibrate_toml(result), file=out, end="")
     return 0
 
 
@@ -387,7 +418,6 @@ def _write_resolved(config: Config, resolved: Resolved) -> None:
 
 
 def _print_estimate(resolved: Resolved, config: Config, out: TextIO) -> None:
-    lane = config.vision_lane if config.vision_lane != "auto" else "claude"
     duration = timecode.format(resolved.duration, tenths=False)
     captions = (
         "yes"
@@ -402,9 +432,24 @@ def _print_estimate(resolved: Resolved, config: Config, out: TextIO) -> None:
     planned = plan_frames(synthetic, resolved.duration, config)
     frames = len(planned.frames)
     per_call = max(1, int(config.frames_per_call))
-    calls = math.ceil(frames / per_call) if frames else 0
-    fixed, per_frame = _SPIKE_TOKENS_PER_CALL
-    tokens = calls * fixed + frames * per_frame
+    plan = Plan(
+        frames=frames,
+        transcript_minutes=resolved.duration / 60.0,
+        frames_per_call=per_call,
+    )
+    snap_path, refresh_script = resolve_usage_paths(config)
+    # Load usage only for auto (chooser) or a subscription lane's window projection.
+    if config.vision_lane == "auto" or config.vision_lane in SUBSCRIPTION_LANES:
+        snapshot = load_snapshot(
+            snap_path, refresh=True, refresh_script=refresh_script
+        )
+    else:
+        snapshot = None
+    explicit = None if config.vision_lane == "auto" else config.vision_lane
+    choice = choose(
+        plan, snapshot, get_coefficients(), config, explicit_lane=explicit
+    )
+    lane = choice.lane
 
     print(f"title: {resolved.title}", file=out)
     print(f"channel: {resolved.channel}", file=out)
@@ -414,15 +459,24 @@ def _print_estimate(resolved: Resolved, config: Config, out: TextIO) -> None:
     print(f"chapters: {chapters}", file=out)
     print(f"frames upper bound: {frames}", file=out)
     print(f"vision lane: {lane}", file=out)
-    print(f"tokens (est): {tokens} ({calls} calls, {frames} frames)", file=out)
-    # TODO(#26): per-lane projection table (tokens, quota windows, dollars).
+    chosen_proj = next((p for p in choice.projections if p.lane == lane), None)
+    if chosen_proj is not None and lane != "none":
+        print(
+            f"tokens (est): {chosen_proj.tokens} "
+            f"({chosen_proj.calls} calls, {frames} frames)",
+            file=out,
+        )
+    elif lane == "none":
+        print(f"tokens (est): 0 (0 calls, {frames} frames)", file=out)
+    else:
+        print(f"tokens (est): 0 ({0} calls, {frames} frames)", file=out)
+    if lane != "none":
+        print(format_projection_table(choice), file=out)
     if lane == "none":
         return
-    if lane == "gemini":
+    if lane in METERED_LANES:
         model = config.vision_model.get("gemini", "gemini-3.5-flash-lite")
-        rate_in, rate_out = RATES.get(model, RATES.get("gemini-3.5-flash-lite", (0.30, 2.50)))
-        est_out = frames * _OUTPUT_TOKENS_PER_FRAME
-        dollars = tokens * rate_in / 1e6 + est_out * rate_out / 1e6
+        dollars = chosen_proj.usd if chosen_proj is not None else 0.0
         print(f"dollars (est): ${dollars:.4f} ({model})", file=out)
     else:
         print("dollars (est): $0 (subscription)", file=out)
@@ -431,14 +485,25 @@ def _print_estimate(resolved: Resolved, config: Config, out: TextIO) -> None:
 def _print_frames_line(
     config: Config, video_id: str, out: TextIO, *, range_label: str = "full"
 ) -> None:
-    # Match the pipeline's run key (auto → claude until #26).
-    keyed = config if config.vision_lane != "auto" else replace(config, vision_lane="claude")
-    try:
-        key = make_run_key(keyed, range_label)
-    except ConfigError:
-        return
-    path = Path(config.cache_dir) / "runs" / video_id / key / "frames.json"
-    if not path.is_file():
+    runs = Path(config.cache_dir) / "runs" / video_id
+    path: Path | None = None
+    if config.vision_lane != "auto":
+        try:
+            key = make_run_key(config, range_label)
+        except ConfigError:
+            return
+        candidate = runs / key / "frames.json"
+        if candidate.is_file():
+            path = candidate
+    else:
+        # Pipeline already resolved auto into a concrete lane under runs/<id>/<key>/.
+        candidates = sorted(
+            runs.glob("*/frames.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        path = candidates[0] if candidates else None
+    if path is None or not path.is_file():
         return
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -451,8 +516,10 @@ def _print_frames_line(
 
 
 def _format_cost(cost_usd: float, vision_lane: str) -> str:
-    lane = "claude" if vision_lane == "auto" else vision_lane
-    if lane in _SUBSCRIPTION_LANES:
+    """Print dollars whenever spend is non-zero or the lane is metered."""
+    if cost_usd > 0 or vision_lane in METERED_LANES:
+        return f"cost: ${cost_usd:.3f}"
+    if vision_lane in SUBSCRIPTION_LANES or vision_lane == "auto":
         return "cost: $0.000 (subscription)"
     return f"cost: ${cost_usd:.3f}"
 

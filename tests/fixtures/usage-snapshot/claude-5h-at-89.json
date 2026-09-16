@@ -1,0 +1,35 @@
+{
+  "generatedAt": "2026-09-16T18:00:00Z",
+  "providers": {
+    "claude": {
+      "metrics": [
+        {
+          "id": "five_hour",
+          "label": "5-hour window",
+          "percentUsed": 89,
+          "resetsAt": "2026-09-16T23:00:00Z"
+        },
+        {
+          "id": "seven_day",
+          "label": "7-day window",
+          "percentUsed": 40,
+          "resetsAt": "2026-09-23T08:00:00Z"
+        }
+      ]
+    },
+    "openai": {
+      "metrics": [
+        {
+          "id": "primary",
+          "percentUsed": 10,
+          "resetsAt": "2026-09-16T23:00:00Z"
+        },
+        {
+          "id": "secondary",
+          "percentUsed": 20,
+          "resetsAt": "2026-09-23T08:00:00Z"
+        }
+      ]
+    }
+  }
+}

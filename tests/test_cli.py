@@ -6,6 +6,8 @@ import io
 import json
 from pathlib import Path
 
+import pytest
+
 from frameweave.cli import _collect_flags, _flags_dict, cli_flags, main, preflight_checks
 from frameweave.config import load
 from frameweave.stt.base import SttResult
@@ -434,6 +436,41 @@ def test_flags_dict_passes_config_dests() -> None:
     )
 
 
+def test_inspect_prints_lane_projection_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #26: inspect prints one projection row per candidate lane."""
+    from datetime import UTC, datetime
+
+    from frameweave.vision.choose import Snapshot
+
+    snap = Snapshot(
+        generated_at=datetime(2026, 9, 16, 18, 0, 0, tzinfo=UTC),
+        metrics={
+            "claude": {"five_hour": 10.0, "seven_day": 20.0},
+            "openai": {"primary": 5.0, "secondary": 15.0},
+        },
+    )
+    monkeypatch.setattr("frameweave.cli.load_snapshot", lambda *a, **k: snap)
+
+    video = _video(tmp_path)
+    kwargs = _load_kwargs(tmp_path)
+    kwargs["env"] = {**kwargs["env"], "FRAMEWEAVE_VISION_LANE": "auto"}
+    buf = io.StringIO()
+    code = main(
+        ["inspect", str(video)],
+        backends={"source": FakeSource(video=video)},
+        stdout=buf,
+        **kwargs,
+    )
+    assert code == 0
+    text = buf.getvalue()
+    assert "lane projection:" in text
+    assert "claude" in text
+    assert "gemini" in text
+    assert "chosen:" in text
+
+
 def test_no_dollars_line_for_lane_none(tmp_path: Path) -> None:
     """Finding 7: lane none omits the dollars estimate line."""
     video = _video(tmp_path)
@@ -477,3 +514,13 @@ def test_cache_size(tmp_path: Path) -> None:
     code = main(["cache", "size"], stdout=buf, **kwargs)
     assert code == 0
     assert "cache:" in buf.getvalue()
+
+
+def test_format_cost_prints_dollars_for_metered_or_nonzero() -> None:
+    """Auto→gemini must not say subscription; any cost_usd > 0 prints dollars."""
+    from frameweave.cli import _format_cost
+
+    assert _format_cost(0.012, "gemini") == "cost: $0.012"
+    assert _format_cost(0.0, "gemini") == "cost: $0.000"
+    assert _format_cost(0.0, "claude") == "cost: $0.000 (subscription)"
+    assert _format_cost(0.05, "claude") == "cost: $0.050"
