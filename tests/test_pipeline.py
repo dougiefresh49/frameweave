@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -25,6 +26,27 @@ from tests.fakes.pipeline import FakeSource, FakeStt, FakeVision
 from tests.make_synthetic import make as make_synthetic
 
 MISSING_TOML = Path("/nonexistent/frameweave-test/config.toml")
+
+
+def _child_vision_env(tmp_path: Path) -> dict[str, str]:
+    """Env for a spawned child where claude/codex vision-lane presence passes.
+
+    A child subprocess is a fresh interpreter: this test's monkeypatched
+    ``shutil.which``/``os.environ`` (the conftest presence fixture) never
+    reaches it, so on a runner with no real `claude`/`codex` CLI the child's
+    own presence check fails. Give it stub executables on `PATH` (prepended,
+    so real tools like ffmpeg/yt-dlp still resolve) and a `GEMINI_API_KEY`.
+    """
+    bin_dir = tmp_path / "stub-bin"
+    bin_dir.mkdir(exist_ok=True)
+    for name in ("claude", "codex"):
+        stub = bin_dir / name
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    env["GEMINI_API_KEY"] = "test-key"
+    return env
 
 
 def _cfg(tmp_path: Path, **flags: object):
@@ -661,7 +683,9 @@ def test_sigint_subprocess_reconciles_and_clears_temps(tmp_path: Path) -> None:
             time.sleep(0.05)
         """
     )
-    proc = subprocess.Popen([sys.executable, "-c", code])
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code], env=_child_vision_env(tmp_path)
+    )
     try:
         for _ in range(200):
             if ready.is_file():
@@ -789,6 +813,7 @@ def test_signal_during_describe_stops_within_one_batch(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=_child_vision_env(tmp_path),
     )
     stderr_text = ""
     try:
