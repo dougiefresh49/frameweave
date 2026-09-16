@@ -1,4 +1,4 @@
-"""CLI: doctor, inspect, run, and cache size.
+"""CLI: doctor, inspect, run, and cache size/prune.
 
 Collects ``cli_flags()`` from modules, wires subcommands, and never spends on
 ``inspect`` or ``--dry-run``.
@@ -163,7 +163,22 @@ def _build_parser() -> argparse.ArgumentParser:
 
     cache = sub.add_parser("cache", help="Cache utilities.")
     cache_sub = cache.add_subparsers(dest="cache_command")
-    cache_sub.add_parser("size", help="Print the total cache size.")
+    cache_sub.add_parser("size", help="Print per-video and total cache size.")
+    prune = cache_sub.add_parser(
+        "prune",
+        help="Delete old sources/runs with no pending obligations.",
+    )
+    prune.add_argument(
+        "--older-than",
+        default="30d",
+        help="Delete entries whose newest file is older than this (Nd or Nh; default 30d).",
+    )
+    prune.add_argument(
+        "--yes",
+        action="store_true",
+        default=False,
+        help="Actually delete; without this flag only print the plan.",
+    )
 
     lanes = sub.add_parser("lanes", help="Vision lane coefficient helpers.")
     lanes_sub = lanes.add_subparsers(dest="lanes_command", required=True)
@@ -373,12 +388,47 @@ def _cmd_run(
 
 
 def _cmd_cache(args: argparse.Namespace, load_kwargs: dict[str, Any], out: TextIO) -> int:
-    if getattr(args, "cache_command", None) != "size":
-        print("frameweave cache: only 'size' is available; prune is issue #23", file=out)
+    from frameweave.cache import parse_older_than, prune, size
+
+    command = getattr(args, "cache_command", None)
+    if command not in {"size", "prune"}:
+        print("frameweave cache: choose 'size' or 'prune'", file=out)
         return 1
     config = load(flags={}, **load_kwargs)
-    size = _dir_size(config.cache_dir)
-    print(f"cache: {_format_bytes(size)} ({config.cache_dir})", file=out)
+    if command == "size":
+        report = size(config.cache_dir)
+        for row in report.videos:
+            print(
+                f"{row.video_id}: {_format_bytes(row.total_bytes)} "
+                f"(sources {_format_bytes(row.sources_bytes)}, "
+                f"runs {_format_bytes(row.runs_bytes)})",
+                file=out,
+            )
+        print(
+            f"cache: {_format_bytes(report.total_bytes)} ({config.cache_dir})",
+            file=out,
+        )
+        return 0
+
+    try:
+        older_than = parse_older_than(str(getattr(args, "older_than", "30d")))
+    except ValueError as exc:
+        print(f"frameweave cache prune: {exc}", file=out)
+        return 1
+    yes = bool(getattr(args, "yes", False))
+    report = prune(config.cache_dir, older_than, dry_run=not yes)
+    verb = "would delete" if report.dry_run else "deleted"
+    for target in report.targets:
+        print(
+            f"{verb} {target.kind}/{target.video_id} "
+            f"({_format_bytes(target.bytes)})",
+            file=out,
+        )
+    if report.dry_run:
+        print(f"would free: {_format_bytes(report.bytes_freed)}", file=out)
+        print("add --yes to delete", file=out)
+    else:
+        print(f"freed: {_format_bytes(report.bytes_freed)}", file=out)
     return 0
 
 
