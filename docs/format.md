@@ -40,7 +40,7 @@ The productions, exactly:
 <said>     = [<range>] said/<tag>: <text>
 <seen>     = [<time>] seen/<tag> #f<dddd> frames/<file>.jpg: <one sentence>
 <seen+>    = [<time>] seen+/<tag> #f<dddd> frames/<file>.jpg: <one sentence>
-<text>     =   text: "<string>", "<string>", ...
+<text>     =   text: "<string>"[, "<string>"]...     (one or more)
              |   text: illegible
              |   text:
 <chapter>  = ## [<time>] <title>
