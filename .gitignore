@@ -1,0 +1,24 @@
+# secrets and local config
+.env
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+# media never enters git; test media is generated or lives outside the repo
+*.mp4
+*.mkv
+*.webm
+*.m4a
+*.mp3
+*.wav
+*.jpg
+*.jpeg
+*.png
+tests/fixtures/private/
+# machine
+.DS_Store

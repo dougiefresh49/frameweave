@@ -1,0 +1,1056 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>frameweave: from-scratch plan and audit (2026-09-15)</title><style>:root{--fg:#1f2328;--muted:#57606a;--bg:#fff;--line:#d0d7de;--acc:#0969da;--soft:#f6f8fa}
+@media(prefers-color-scheme:dark){:root{--fg:#e6edf3;--muted:#9da7b3;--bg:#0d1117;--line:#30363d;--acc:#58a6ff;--soft:#161b22}}
+html{background:var(--bg);color:var(--fg)}body{max-width:960px;margin:0 auto;padding:2rem 1.25rem 5rem;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+h1{font-size:1.9rem;line-height:1.2;margin:.2rem 0 .6rem}h2{font-size:1.35rem;margin:2.4rem 0 .8rem;padding-bottom:.3rem;border-bottom:1px solid var(--line)}h3{font-size:1.05rem;margin:1.6rem 0 .5rem}
+p,li{max-width:78ch}a{color:var(--acc)}code{font:.9em ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--soft);padding:.1em .3em;border-radius:4px}
+pre{background:var(--soft);border:1px solid var(--line);border-radius:6px;padding:.9rem;overflow:auto;font-size:.85em;line-height:1.45}pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:.8rem 0 1.2rem;font-size:.92em}th,td{border:1px solid var(--line);padding:.4rem .6rem;vertical-align:top;text-align:left}th{background:var(--soft)}
+.tldr{background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:1rem 1.2rem;margin:1rem 0 1.5rem}.tldr p{margin:.4rem 0}
+nav{font-size:.92em;color:var(--muted);margin:0 0 1.5rem}nav a{margin-right:.9rem;white-space:nowrap}.meta{color:var(--muted);font-size:.9em}</style></head><body><h1 id="plan">frameweave: from-scratch plan and audit</h1><p class="meta">2026-09-15, revision 2 · lead: Fable 5.1 · drafters and reviewers: Fable 5.1, GPT-6 Astra (high)</p><div class="tldr">
+<p><strong>TLDR.</strong> Audit of every session with the prior tool (7 sessions, 66 human turns) produced a 13-item requirements ledger. Fable 5.1 and GPT-6 Astra each drafted a plan from it and reviewed the other's (18 and 20 findings). This final plan takes Fable's wave structure and Astra's acceptance rigor: Python via uv, captions-first speech with local WhisperX fallback, frames to a subscription-backed vision lane (codex or Claude Code, both verified on a real frame) with metered Gemini Flash-Lite as fallback, and a new line-grammar format with provenance per line. $0 marginal per captioned video on a subscription lane versus about $0.45-0.60 today.</p>
+<p><strong>Revision 4 (2026-09-16).</strong> Three interview rounds closed every question. The product is <code>frameweave</code>, MIT, public on GitHub. There is no fixed vision lane: the bake-off fits a token and quota estimate per lane, and a chooser reads live usage and picks per run, never spending Fable or GPT-6 Astra on frames. Speaker labels join M1 for client meetings, tested on a real kickoff recording that stays out of git. 27 backlog items across M0-M3, cut into GitHub issues once the repo exists.</p>
+<p class="meta">Sources in the repo: <code>docs/PLAN.md</code>, <code>docs/questions.md</code>, <code>docs/decisions.md</code>, <code>docs/audit/</code> (prior-tool audit with per-session reports, pricing, voice-lab borrow), <code>docs/plans/</code> (both drafts, both reviews, the brief).</p></div><nav><a href="#plan">Plan</a><a href="#backlog">Backlog</a><a href="#roundtable">Roundtable record</a><a href="#questions">Questions for Doug</a><a href="#decisions">Decision log</a><a href="#borrow">Borrowed from voice-lab</a><a href="#audit">Audit in brief</a></nav>
+<p>Final plan after a two-drafter cycle: Fable 5.1 and GPT-6 Astra (high) each drafted a plan from the same brief and the same evidence, each reviewed the other's, and the lead (Fable, main session) folded both into this document. Drafts, reviews, and the brief are under <code>docs/plans/</code>; the audit and pricing evidence are under <code>docs/audit/</code>. The roundtable record at the end lists every reviewer finding and what happened to it.</p>
+<p>Naming rule, carried from the audit: nothing here names or reproduces anything from the prior tool. The design below was derived from the requirements ledger R1-R13 in <code>docs/audit/2026-09-15-prior-tool-audit.md</code>.</p>
+<h2 id="plan">1. Summary</h2>
+<p>A CLI plus an agent skill. Input: a YouTube URL (whole video, <code>--start/--end</code>, or <code>--chapter "title"</code>), a direct or signed media URL, or a local file. Output: one self-contained folder under a configurable root, holding a plain-text transcript that interleaves what was said with what was on screen and references to extracted frames, the frames, <code>meta.json</code>, <code>cost.json</code>, and a generated README with a trust table per line kind. Seven pipeline stages, each writing one cached artifact; a rerun skips every stage whose inputs and settings are unchanged.</p>
+<p>The three decisions that shape everything else:</p>
+<ol>
+<li><strong>Python 3.12 pinned and managed by uv.</strong> Installed as a <code>uv tool</code> shim; the tool never touches Homebrew Python. yt-dlp is a locked Python dependency. Two Homebrew dependencies remain, <code>uv</code> and <code>ffmpeg</code>, and <code>doctor</code> owns both. Both drafters chose this independently against the audit's runtime failures (R2).</li>
+<li><strong>Frames to a vision model, not whole video to Gemini, and subscription lanes before metered ones.</strong> Speech comes from captions or a speech-to-text pass; the vision model only describes frames, in batches with the surrounding transcript as context, so every description has an exact timestamp by construction. Doug's call (2026-09-15): prefer a route already covered by a subscription over paying per frame. Two such routes exist on this Mac and both accept images headless and report tokens per call: codex (<code>codex exec -i</code>, OpenAI subscription) and Claude Code (<code>claude -p</code> with Read, Anthropic subscription, sonnet tier). Gemini CLI is out (Doug, 2026-09-16: his Gemini use is SDK and API only). The vision interface treats the two lanes as backends beside the metered APIs (Gemini 2.5 Flash-Lite; GPT-5 nano/mini if a key appears), and the bake-off spike measures all of them on the same labeled frames for exact-text recall, latency, tokens, and quota use. There is no fixed default lane. Doug's call (2026-09-16): the spike produces a per-lane estimate of tokens and quota share for a video of x frames and y minutes; at run time the tool reads the <code>ai-usage</code> snapshot, projects each lane's window after the run, and picks the lane with the most headroom left, so the coveted pools (Fable's own weekly cap, GPT-6 Astra) are never spent on frames: the Claude lane is sonnet only and the codex lane is the cheapest codex model that passes the floor, never GPT-6 by default. Every run's <code>cost.json</code> feeds the estimate back. Metered fallback Gemini 2.5 Flash-Lite for unattended or quota-exhausted runs. Whole-video understanding becomes an optional M3 pass. Marginal cost of a captioned run on a subscription lane is $0; the metered fallback is about $0.01-0.06 per 30-minute recording, versus about $0.45-0.60 today (R9).</li>
+<li><strong>A line-grammar text format with provenance on every line.</strong> Three body kinds an agent greps without a parser (<code>said</code>, <code>seen</code>, <code>text</code>), a source tag on each, a <code>completion:</code> header that says whether speech is present, and a nonzero exit when it is not. Additive by rule; JSON sidecars beside it. Name, extension, and header are Doug's pick from the slate in section 3.</li>
+</ol>
+<p>Execution model: GitHub issues, one per backlog item, one worktree each, files-you-own lists that do not overlap within a wave, and a verifier who is never the builder.</p>
+<h2>2. Architecture</h2>
+<h3>Pipeline</h3>
+<p>Each stage takes the artifacts to its left and writes exactly one artifact. Every provider call has a hard timeout, retries 429/5xx three times with jittered backoff and <code>Retry-After</code>, and appends a request-level record to the ledger before the stage is marked done. Timeouts fail with a message naming the three ways out and the flag for each (longer timeout, lower detail, fewer frames per call).</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>stage</th>
+<th>input</th>
+<th>artifact</th>
+<th>provider plug</th>
+<th>notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>resolve</td>
+<td>URL or path</td>
+<td><code>resolved.json</code>: title, channel, id, duration, upload date, description, links parsed from it, chapters, caption tracks</td>
+<td>none (yt-dlp metadata, ffprobe)</td>
+<td>Printed before anything costs money, with a labeled cost estimate and frame upper bound. <code>--dry-run</code> stops here (R1, R8).</td>
+</tr>
+<tr>
+<td>2</td>
+<td>fetch-media</td>
+<td>resolved</td>
+<td><code>media.mp4</code> + <code>media.json</code> (sha256, ffprobe-verified duration)</td>
+<td>none (yt-dlp with client chain; httpx for direct URLs)</td>
+<td>Player clients pinned to android, mweb, web (the default android_vr hands out URLs that 403; voice-lab verified 2026-08-17), with a format ladder from 720p to progressive behind them; a last-resort degraded pull writes a warning into <code>meta.json</code>. Partial files never count as media; artifacts are written to a temp name and renamed. Bytes that ffprobe rejects fail with "this is not media (looks like HTML); download it in your browser and pass the file". Media stays cached (R1).</td>
+</tr>
+<tr>
+<td>3</td>
+<td>fetch-captions</td>
+<td>resolved</td>
+<td><code>captions.json</code> or <code>captions.none</code> with reason</td>
+<td>none (yt-dlp subtitle fetch)</td>
+<td>Independent of stage 2; a 429 or missing track writes <code>captions.none</code> and the run continues (R6).</td>
+</tr>
+<tr>
+<td>4</td>
+<td>transcript</td>
+<td>captions or media</td>
+<td><code>transcript.json</code>: segments <code>{id, start, end, text, source, words?, quality?}</code></td>
+<td>STT: local WhisperX (M1, free, about realtime on this Mac), hosted whisper-1 or Groq as optional metered routes (M2)</td>
+<td>Captions: per-line dedup of rolling cues, then segments of 20-40 s at sentence ends. No captions: 16 kHz mono audio, chunked with overlap, segment timestamps rebased, bounds clamped to words (edge word over 0.9 s is alignment stretch, capped). Empty result sets <code>completion: incomplete</code>, warns in terminal, README, and meta, and the run exits 2 (R6).</td>
+</tr>
+<tr>
+<td>5</td>
+<td>frames</td>
+<td>transcript, media, range</td>
+<td><code>frames/*.jpg</code> + <code>frames.json</code> (id, time to the tenth, kind primary or extra)</td>
+<td>none (ffmpeg)</td>
+<td>Budgeted sampling (below). 1280 px wide; <code>--frame-width</code> for the low-res escape hatch (R7).</td>
+</tr>
+<tr>
+<td>6</td>
+<td>describe</td>
+<td>frames, transcript</td>
+<td><code>descriptions.json</code> keyed by frame id</td>
+<td>vision: subscription CLI backends (codex, claude) and metered API backends (gemini, openai); lane chosen per run by the usage-aware chooser (item 26) from the spike's estimate</td>
+<td>Batches of N frames (N from the spike, provisional 4 for CLI lanes, 8 for APIs) plus the transcript window. Per frame: a short description and on-screen strings quoted exactly; numbers are transcribed, never inferred; "illegible" is a first-class answer. Responses that omit, duplicate, or reorder frame ids are rejected and retried. CLI backends report tokens per call (codex prints <code>tokens used</code>; <code>claude -p --output-format json</code> carries usage), so the ledger records tokens, calls, wall clock, and the lane's quota reading before and after, and marks dollars as $0 subscription (R7, R9).</td>
+</tr>
+<tr>
+<td>7</td>
+<td>assemble</td>
+<td>all of the above</td>
+<td>the output folder</td>
+<td>none</td>
+<td>Writes the transcript file, <code>meta.json</code>, <code>cost.json</code>, copies frames, generates <code>README.md</code>, prints the absolute output path and run cost as the last two lines.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Frame budget.</strong> Default budget <code>max(80, 2 * duration_minutes)</code> frames per run, so 80 up to 40 minutes and about two per minute beyond that, the density of Doug's past runs; <code>--max-frames</code> overrides. The budget covers the whole video or range; frames are never chunked (only STT audio is, and that is invisible to the frame plan). Candidates are segment starts plus one every <code>--frame-interval</code> (default 45 s) inside segments longer than the interval. If starts alone fit, extras fill the remaining budget by widening the interval. If starts alone exceed the budget, adjacent segments are merged into presentation windows of at least <code>ceil(duration / budget)</code> seconds (never more than 45 s under the default rule, since the budget grows with duration) and one frame is taken at each window start, so coverage always reaches the final window; <code>meta.json</code> records segments, windows, and frames kept. Interval sampling is a heuristic and the README says so: a screen shown for under about 40 s can fall between samples.</p>
+<p><strong>Cache and concurrency.</strong> Two areas under <code>~/Library/Caches/frameweave/</code>: <code>sources/&lt;video-id&gt;/</code> (immutable once written: media, media.json, captions, resolved) and <code>runs/&lt;video-id&gt;/&lt;run-key&gt;/</code> where the run key hashes the range plus every setting that changes an artifact (models, prompt revision, frame interval, width, budget, detail level). Changing frame density invalidates stages 5-7 only. A per-source claim dir (<code>mkdir</code> with a pid file; a claim whose pid is dead is stale and taken) prevents two runs downloading the same video at once; two chapter runs of one video get distinct run keys and distinct output folders. Video id is the YouTube id or the sha256 of the file or URL bytes.</p>
+<p><strong>Cleanup obligations.</strong> Any remote upload id is written to <code>runs/.../cleanup.json</code> before the request is sent and removed after deletion. On start, the tool reconciles outstanding obligations from any prior run. Handled signals also clean up, but the on-disk record is what survives an uncatchable kill (the exit 137 case in the audit).</p>
+<p><strong>Range and chapter runs.</strong> <code>--start/--end</code> and <code>--chapter</code> filter stages 4-7 to the window and reuse stages 1-3, so a second chapter of the same video costs no download. <code>--speakers</code> adds diarization (item 27) and <code>--vision none</code> turns the vision stage off for a recording that must not leave the machine (decision 31). <code>--chapter</code> matches resolved chapter titles case-insensitively and by prefix and errors with the list when ambiguous; explicit range flags outrank a <code>?t=</code> in the URL.</p>
+<h3>Repo layout</h3>
+<pre><code>frameweave/
+  AGENTS.md  CLAUDE.md  LICENSE  README.md
+  pyproject.toml  uv.lock  .python-version
+  docs/PLAN.md  docs/decisions.md  docs/questions.md  docs/format.md
+  docs/audit/  docs/plans/
+  src/&lt;pkg&gt;/
+    __init__.py  cli.py  config.py  preflight.py  pipeline.py  ledger.py  types.py
+    sources/   __init__.py (Source protocol lives in types.py)  youtube.py  http.py  local.py
+    captions.py
+    stt/       base.py  audio.py  local.py  speakers.py  openai.py (M2)  groq.py (M2)
+    frames.py  dedupe.py (M2)
+    vision/    base.py  cli.py  gemini.py  choose.py  openai.py (M2)  prompt.md
+    format/    writer.py  readme.py  mangles.toml
+    util/      timecode.py  media.py  retry.py
+  tests/
+    fixtures/  fakes/  recorded/&lt;provider&gt;/
+    test_&lt;module&gt;.py
+  skills/frameweave/SKILL.md
+  scripts/scrub.sh  .githooks/pre-push
+  .github/workflows/ci.yml
+</code></pre>
+<p>Extension seams, so later items never edit files they do not own: <code>pipeline.py</code> holds an ordered stage registry list; each module exposes <code>cli_flags()</code> and <code>preflight_checks()</code> that <code>cli.py</code> and <code>preflight.py</code> collect; <code>readme.py</code> renders warnings and stats from <code>meta.json</code> rather than knowing about individual features; every dependency, including optional extras groups, is declared in <code>pyproject.toml</code> in M0; <code>uv.lock</code> is regenerated by the lead at merge time.</p>
+<h3>One output folder</h3>
+<pre><code>&lt;root&gt;/&lt;channel-slug&gt;/&lt;video-slug&gt;/            # or &lt;video-slug&gt;/&lt;chapter-slug&gt;/ for a range run (Q3)
+  README.md            generated: start here, trust table, caption mangles, limits, provenance
+  transcript.&lt;ext&gt;     fixed name so agents never guess it
+  meta.json            resolved facts, description, links, chapters, transcript source, completion, warnings, stats
+  cost.json            request ledger summary: current run, reused from cache, unknown; total_usd
+  frames/f0012-00-04-30.0.jpg   frame id plus HH-MM-SS.t
+</code></pre>
+<p>All paths inside the folder are relative. Nothing is written outside the cache and the output folder.</p>
+<h2>3. Output format</h2>
+<h3>Name, extension, header (Q1, answered: B)</h3>
+<table>
+<thead>
+<tr>
+<th>option</th>
+<th>CLI and package</th>
+<th>file</th>
+<th>first line</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A</td>
+<td><code>watchlog</code></td>
+<td><code>transcript.watchlog</code></td>
+<td><code>watchlog 1</code></td>
+</tr>
+<tr>
+<td>B</td>
+<td><code>frameweave</code></td>
+<td><code>transcript.fwv</code></td>
+<td><code>frameweave 1</code></td>
+</tr>
+<tr>
+<td>C</td>
+<td><code>cuesheet</code></td>
+<td><code>transcript.cues</code></td>
+<td><code>cuesheet 1</code></td>
+</tr>
+</tbody>
+</table>
+<p>Doug chose B, <code>frameweave</code>, on 2026-09-16; the examples below use it. The version integer on the first line is the only parsing an agent needs; header <code>key: value</code> lines follow until the first blank line, then the body.</p>
+<h3>The transcript file</h3>
+<p>Body: one event per line, <code>[time] kind/source payload</code>; continuation lines indented two spaces; chapter headings <code>## [HH:MM:SS] title</code> so <code>grep '^## '</code> gives the video map.</p>
+<ul>
+<li><code>said/&lt;source&gt;</code> with a time range: what was spoken. Source is <code>captions</code>, <code>captions-auto</code>, <code>stt-whisper-1</code>, and so on.</li>
+<li><code>seen/&lt;model&gt;</code> with a frame id and path: what is on screen at a segment start. <code>seen+</code> marks an extra interval frame inside the same segment, which is how a reader that wants one frame per segment ignores the rest.</li>
+<li><code>text</code>: indented, quoted on-screen strings exactly as the model read them. Model-read; the README says to verify a number or identifier against the frame before reusing it.</li>
+</ul>
+<pre><code>frameweave 1
+title: Connecting a worker to a queue
+channel: example-channel
+source: https://www.youtube.com/watch?v=XXXXXXXXXXX
+duration: 00:30:00
+range: full
+transcript-source: captions-auto
+vision: openai/gpt-5-mini high, 8 per call
+frames: 78 primary 46 extra 32 at 1280px
+completion: complete
+generated: 2026-09-15T21:04:11Z frameweave 0.1.0
+chapters: 00:00:00 Intro; 00:04:30 The queue; 00:12:52 Results
+
+## [00:04:30] The queue
+
+[00:04:30-00:04:47] said/captions-auto: so I connect the worker to the jobs queue and watch it drain
+[00:04:30] seen/gpt-5-mini #f0012 frames/f0012-00-04-30.0.jpg: Terminal on the left, a config file open on the right.
+  text: &quot;QUEUE_NAME=jobs&quot;, &quot;worker.py&quot;, &quot;45 pending&quot;
+[00:05:15] seen+/gpt-5-mini #f0013 frames/f0013-00-05-15.0.jpg: Same terminal, the queue counter now lower.
+  text: &quot;12 pending&quot;
+</code></pre>
+<p>Additive rule: readers match on <code>[time] kind</code>; unknown kinds, unknown sources, unknown header keys, and <code>seen+</code> lines are ignorable. A <code>said</code> segment is the one whose range contains a frame's time. The only breaking change is the version integer.</p>
+<p><code>completion:</code> is <code>complete</code>, <code>complete-with-warnings</code>, or <code>incomplete</code> with a reason; <code>incomplete</code> for missing speech exits 2 unless the run asked for <code>--frames-only</code>.</p>
+<h3>Sidecars and README</h3>
+<p><code>meta.json</code> carries every resolved fact, the full description and extracted links, chapters, caption track used, completion, <code>warnings</code> (empty transcript, cap hit, captions 429, windows merged), and <code>stats</code> (segments, windows, frames primary and extra, dropped near-duplicates in M2). <code>cost.json</code> summarizes the request ledger: per stage provider, model, input and output and reasoning tokens, seconds, dollars from a dated rate table; <code>current_run_usd</code>, <code>reused_usd</code>, <code>unknown_usd</code> (timed-out requests with no usage returned), and <code>total_usd</code>. Cost is a calculation from list prices, never an invoice.</p>
+<p>The README is generated in Doug's existing shape: title and source with duration and date; start here; contents table; format legend; trust table by kind (<code>said</code> verbatim from its source, <code>seen</code> model-described, <code>text</code> model-read and to be verified, frames ground truth); a caption-mangling table seeded from <code>mangles.toml</code> and any <code>--glossary</code> file, filtered to mangles that occur in this transcript; limits (interval sampling gap, cap or windows, transcript source weaknesses); provenance (tool version, providers and models per stage, cost, command line).</p>
+<h2>4. Provider strategy and cost model</h2>
+<p>Prices from <code>docs/audit/pricing-2026-09-15.md</code>. OpenAI high-detail image tokens are assumed at 920 per 1280x720 frame (32 px patches, 40 by 23, no cap); that number is unverified and the spike replaces it. Gemini is 516 per frame (two 768 px tiles, documented). Each batch of 8 frames carries about 1,800 text tokens; output about 180 tokens per frame.</p>
+<table>
+<thead>
+<tr>
+<th>stage</th>
+<th>default</th>
+<th>fallback</th>
+<th>why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>media</td>
+<td>yt-dlp locked at or above 2026.08.19; player clients android, mweb, web; format ladder 720p then progressive</td>
+<td>PO-token provider hook (M2)</td>
+<td>the android_vr regression is fixed in that release; PO-token enforcement keeps expanding; the client order is voice-lab's verified one</td>
+</tr>
+<tr>
+<td>captions</td>
+<td>yt-dlp subtitle fetch, manual track then auto</td>
+<td>none; falls through to STT</td>
+<td>separate resource, separate failure handling (R6)</td>
+</tr>
+<tr>
+<td>STT (M1)</td>
+<td>local WhisperX large-v3-turbo, word timestamps and per-word scores, free; measured 1.03-1.16x realtime per worker on this Mac (voice-lab log, CPU int8, four workers sharing the CPU)</td>
+<td>none in M1; a run with no captions and no local model exits 2</td>
+<td>no OpenAI or Groq key exists on this Mac; the local install is proven in voice-lab; the spike measures MPS and <code>mlx-whisper</code> for a faster local path</td>
+</tr>
+<tr>
+<td>STT (M2, optional)</td>
+<td>hosted whisper-1 ($0.006/min, documented timestamps) or Groq ($0.04/hr) once a key exists and the spike confirms timestamps</td>
+<td>local</td>
+<td>only worth it for a machine without the local model or for speed</td>
+</tr>
+<tr>
+<td>vision</td>
+<td>two subscription CLI lanes, chosen per run by headroom (item 26): codex <code>exec -i</code> on the cheapest codex model that passes the floor (candidates gpt-5.6-luna, gpt-5.5, gpt-5.6-sol, gpt-5.6-terra at low effort; the configured default gpt-6-astra is never used for frames unless asked), and Claude Code <code>-p</code> with Read on sonnet (verified on a real frame 2026-09-15: exact strings quoted; never Fable)</td>
+<td>metered Gemini 2.5 Flash-Lite, then GPT-5 mini if an OpenAI key appears</td>
+<td>Doug's call: no per-frame billing when a subscription already covers it, and never spend a coveted pool on frames; legibility of small UI text is the job. Gemini CLI dropped (Q17)</td>
+</tr>
+<tr>
+<td>whole-video understanding</td>
+<td>none</td>
+<td>Gemini 3.x Flash <code>--deep</code> (M3)</td>
+<td>keeps upload, chunking, and timeout machinery out of the default path</td>
+</tr>
+</tbody>
+</table>
+<p>Subscription lanes cost nothing per frame but have quotas and are slower (seconds per call, one process each). Both report tokens per call, and the <code>ai-usage</code> snapshot (<code>~/Library/Application Support/AgentUsageBar/usage-snapshot.json</code>) reports each pool as a percentage of its 5-hour and 7-day windows: Claude <code>five_hour</code>, <code>seven_day</code>, and a separate <code>limit.*</code> row for Fable's weekly cap; OpenAI <code>primary</code> (5-hour) and <code>secondary</code> (7-day), one pool shared by every codex model. On 2026-09-16 that read Claude 5-hour 5%, 7-day 25%, Fable 7-day 47%; OpenAI 5-hour 0%, 7-day 13%.</p>
+<p>The chooser (item 26) turns that into a per-run decision:</p>
+<ol>
+<li>The spike fits, per lane and model, <code>tokens = a + b * frames + c * transcript_minutes</code> and <code>quota_percent = k * frames</code> from the before-and-after readings, and writes the coefficients to <code>config/lanes.toml</code>.</li>
+<li>Before stage 6 the tool reads the snapshot (or runs the skill's <code>get-usage.sh</code> when it is stale), computes the projected percent of each lane's short and long window after this run, and prints the table in the pre-spend estimate.</li>
+<li>It picks the lane with the most long-window headroom left after the run, skips any lane whose projection crosses 90% on either window, and falls to the metered API with a printed reason when neither lane fits. <code>--vision &lt;lane&gt;</code> overrides; a missing snapshot falls back to codex with a warning.</li>
+<li>After the run <code>cost.json</code> records actual tokens per frame and the quota delta, and the running median from past runs replaces the spike's seed, so the estimate tightens with use.</li>
+</ol>
+<p>Fleet posture applies: sonnet has headroom, Fable is never a vision lane, and GPT-6 Astra is now a coveted pool too, so the codex lane runs a cheaper model.</p>
+<h3>30-minute 1080p screen recording, 90 frames (12 batches)</h3>
+<table>
+<thead>
+<tr>
+<th>option</th>
+<th>input tokens</th>
+<th>input $</th>
+<th>output $</th>
+<th>total</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GPT-5 mini high (provisional default)</td>
+<td>82,800 image + 21,600 text</td>
+<td>$0.026</td>
+<td>$0.032</td>
+<td><strong>$0.06</strong></td>
+</tr>
+<tr>
+<td>GPT-5 nano high</td>
+<td>same</td>
+<td>$0.005</td>
+<td>$0.006</td>
+<td>$0.01</td>
+</tr>
+<tr>
+<td>GPT-5.4 nano high</td>
+<td>same</td>
+<td>$0.021</td>
+<td>$0.020</td>
+<td>$0.04</td>
+</tr>
+<tr>
+<td>Gemini 2.5 Flash-Lite (fallback)</td>
+<td>46,440 image + 21,600 text</td>
+<td>$0.007</td>
+<td>$0.006</td>
+<td><strong>$0.01</strong></td>
+</tr>
+<tr>
+<td>Gemini 3.6 Flash whole video at high (prior approach)</td>
+<td>522,000</td>
+<td>$0.39</td>
+<td>~$0.06</td>
+<td>$0.45</td>
+</tr>
+</tbody>
+</table>
+<p>The table above is the metered fallback. On a subscription lane the same run is $0 marginal and about 12 to 24 CLI calls of a few seconds each. Speech: captions $0; local WhisperX $0 and about 30 minutes of wall clock for a 30-minute captionless video; hosted whisper-1 $0.18 if a key is ever added. Typical captioned run: $0 on a subscription lane, about $0.01-0.06 metered. A 40-minute equivalent is $0 or about $0.10 against the measured $0.60 baseline (R9).</p>
+<h3>60-minute talking head</h3>
+<p>Starts exceed the 80 budget, so windows of 45 s apply: 80 frames, vision about $0.05 on mini, captions $0. With M2 near-duplicate suppression (gated on small-change fixtures) most of those frames drop and vision falls toward $0.01. Whole-video Gemini at high would be about $0.90.</p>
+<h3>The bake-off spike (item 21) measures, before the default is locked</h3>
+<ol>
+<li>Exact-string recall of on-screen text on 20 hand-labeled frames from Doug's existing outputs (file names, tab titles, terminal lines, a number on a slide), scored on exact matches and misread digits.</li>
+<li>The same recall for the subscription lanes: codex on gpt-5.6-luna, gpt-5.5, gpt-5.6-sol, and gpt-5.6-terra at low effort (gpt-6-astra once, as the ceiling, not a candidate), and Claude Code on sonnet; plus seconds per call, tokens per call from each CLI's own report, and how much of each subscription's 5-hour and 7-day window 20 frames consume (<code>ai-usage</code> before and after, one reading per batch so the per-frame slope is measured, not assumed).</li>
+<li>Actual input tokens per frame at high detail for the metered candidates (Gemini 2.5 Flash-Lite with the Gemini key that exists; GPT-5 nano and mini only if an OpenAI key is added), from the usage field.</li>
+<li>Batch size 1, 4, 8 on the winning lane: recall, frame-association errors, seconds per call.</li>
+<li>Local STT: WhisperX on CPU versus MPS versus <code>mlx-whisper</code> on the same 10-minute file: wall clock and segment timestamp drift against captions.</li>
+<li>The estimate: from 2 and 3, fit <code>tokens = a + b * frames + c * transcript_minutes</code> and <code>quota_percent = k * frames</code> per lane and model on the three sample runs (Q6: two Theo videos of 31 and 39 minutes, and the two-chapter run), and check the fit predicts the third sample from the other two within 20%. The coefficients are the spike's deliverable to item 26.</li>
+</ol>
+<p>Lock rule: a candidate qualifies only if it reaches at least 95% exact recall on legible labeled strings, abstains on illegible text rather than guessing, and returns every frame id. Among qualified candidates, a subscription lane beats a metered one. Within each subscription lane, the cheapest model within 5 points of the best recall becomes that lane's model and the best becomes <code>--vision-quality high</code>; between the two lanes there is no fixed default, the chooser decides per run from headroom. The cheapest qualified metered route becomes the fallback. If none qualifies, the default stays open and the spike says so.</p>
+<h2>5. Requirements coverage</h2>
+<table>
+<thead>
+<tr>
+<th>R</th>
+<th>covered by</th>
+<th>notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R1 sources</td>
+<td>6, 7, 8, 15</td>
+<td>media and captions are separate stages; resolved facts and an estimate printed before spend; source cache and lock</td>
+</tr>
+<tr>
+<td>R2 runtime</td>
+<td>2, 5</td>
+<td>uv-managed Python, <code>uv tool</code> shim, <code>doctor</code> with a trustworthy exit code and every binary and key</td>
+</tr>
+<tr>
+<td>R3 output location</td>
+<td>4, 17</td>
+<td>CLI &gt; env &gt; config &gt; default; path honored exactly; no hidden nesting; the skill never passes <code>--out</code></td>
+</tr>
+<tr>
+<td>R4 bundle</td>
+<td>12, 13</td>
+<td>writer and README generator produce Doug's shape from the tool</td>
+</tr>
+<tr>
+<td>R5 long inputs</td>
+<td>2, 11, 18</td>
+<td>retry, backoff, timeouts in <code>util/retry.py</code>; run keys, cleanup obligations, and resume in the pipeline; STT chunking with rebase</td>
+</tr>
+<tr>
+<td>R6 transcript</td>
+<td>9, 18, 27</td>
+<td>captions with per-line dedup and a regression fixture; local WhisperX in M1; source per segment; <code>completion</code> and exit 2</td>
+</tr>
+<tr>
+<td>R7 vision</td>
+<td>10, 11, 21, 22, 26</td>
+<td>1280 px, budgeted sampling, frame ids through responses, exact <code>text:</code> lines, README flags them model-read</td>
+</tr>
+<tr>
+<td>R8 metadata</td>
+<td>6, 12</td>
+<td>description, links, chapters, upload date, channel in <code>meta.json</code> and the header</td>
+</tr>
+<tr>
+<td>R9 cost</td>
+<td>11, 21, 26</td>
+<td>request-level ledger with tokens and quota deltas, dated rate table, printed total and lane projection; $0 on a subscription lane, about $0.06 metered</td>
+</tr>
+<tr>
+<td>R10 format</td>
+<td>3, 12</td>
+<td>own name, extension, header; plain text; additive; JSON sidecars</td>
+</tr>
+<tr>
+<td>R11 agent integration</td>
+<td>16</td>
+<td>skill in the tool repo, universal shape, probed in Claude Code and Codex</td>
+</tr>
+<tr>
+<td>R12 legal</td>
+<td>1</td>
+<td>MIT (assumption, Q4); clean-room from the audit only</td>
+</tr>
+<tr>
+<td>R13 process</td>
+<td>1, 2, 17</td>
+<td>bootstrap, one remote, CI in M0, verifier separate from builder on every item</td>
+</tr>
+</tbody>
+</table>
+<h2>6. Milestones</h2>
+<ul>
+<li><strong>M0, foundation (items 1-5).</strong> Repo bootstrapped from fleet corefiles, one remote, license, uv skeleton with every dependency declared and CI green, format spec and shared types with a fresh-agent reading probe, config schema with every control, <code>doctor</code>. Doug can: clone, run <code>doctor</code>, see a table with a real exit code, and read <code>docs/format.md</code> as the settled format.</li>
+<li><strong>M1, usable (items 6-17, 26, 27, spike 21 in parallel).</strong> A YouTube URL, direct URL, or local file becomes the full bundle: captions or local WhisperX transcript, frames, subscription-lane descriptions, README, sidecars, under the configured root, resumable, with range and chapter runs and the skill. Doug can: from any directory tell Claude Code "analyze this video", get the path and cost back, and have a fresh agent answer "what tools did he use and how did he connect them" from the folder alone. Cost under $0.10 per captioned 40-minute video.</li>
+<li><strong>M2, hardened (items 18-23).</strong> Qualified cheap STT, Gemini fallback provider, near-duplicate suppression with small-change fixtures, <code>frames-only</code> and <code>cache prune</code>, PO-token hook. Doug can: run a captionless video for pennies, switch providers with one flag, recover disk.</li>
+<li><strong>M3, depth (items 24-25).</strong> Local whisper for client recordings, <code>--deep</code> whole-video pass. Doug can: run a client kickoff recording without audio leaving the machine.</li>
+</ul>
+<h2 id="backlog">7. Backlog</h2>
+<p>Rules for every item. One issue, one worktree, one owner. "Owns" is the complete write set, including the item's <code>tests/test_&lt;module&gt;.py</code>; touching anything else means stop and report. Gates: <code>uv run ruff check</code>, <code>uv run pytest</code>, and the item's named artifact. <strong>A verifier who is not the builder reruns the acceptance checks and attaches the artifact; builder assertions do not close an issue.</strong> Review lanes per fleet <code>CLAUDE.md</code>: Sol for logic, fable once for meaning (prompts, format, README copy, skill), grok as overflow. Items sharing a blocked-by set run as one parallel wave.</p>
+<p><strong>1. Bootstrap the repo and settle identity.</strong> M0. Blocked by: nothing (Q1-Q5 and Q12 answered 2026-09-16: <code>frameweave</code>, MIT, uv, public remote). Owns: <code>AGENTS.md</code>, <code>CLAUDE.md</code>, <code>LICENSE</code>, <code>README.md</code>, <code>.gitignore</code>, <code>.claude/settings.json</code>, <code>docs/decisions.md</code>. Acceptance: <code>bootstrap-repo.sh</code> output shows zero <code>[FILL-IN</code> slots; <code>git remote -v</code> shows exactly one remote; <code>docs/decisions.md</code> has one <code>accepted</code> row per answered question and one <code>assumed</code> row per unanswered one; <code>LICENSE</code> is MIT with <code>dougiefresh49</code>; the remote <code>dougiefresh49/frameweave</code> is public, so a scrub check runs before the first push and every push after: a term list of the earlier tool's names that lives outside the repo (never committed, never quoted in any doc) grepped against the tree returns zero hits, and the check itself is a <code>scripts/scrub.sh</code> that reads the list from a path in <code>.env</code>. Delegate: main session (fable); corefile fill-ins are meaning.</p>
+<p><strong>2. Skeleton, dependencies, CI, shared utilities.</strong> M0. Blocked by: 1. Owns: <code>pyproject.toml</code> (every M1-M3 dependency and the <code>local-stt</code> extras group declared now), <code>uv.lock</code>, <code>.python-version</code>, <code>src/&lt;pkg&gt;/__init__.py</code>, <code>src/&lt;pkg&gt;/util/**</code>, <code>.github/workflows/ci.yml</code>, <code>tests/conftest.py</code>, <code>tests/fakes/__init__.py</code>, <code>tests/test_util_*.py</code>. Acceptance: <code>uv tool install --from . frameweave</code> then <code>frameweave --version</code> works in CI with Homebrew Python stripped from PATH; <code>timecode.py</code> round-trips <code>HH:MM:SS(.t)</code>; <code>media.py</code> raises a typed error on non-media bytes; <code>retry.py</code> retries 429/5xx three times with jittered backoff, honors <code>Retry-After</code>, gives up on other 4xx, and its timeout error names the three remedies and their flags (fake client tests); CI runs ruff and pytest and is green. Delegate: composer; Sol reviews lockfile and launcher.</p>
+<p><strong>3. Format spec, shared types, source protocol.</strong> M0. Blocked by: 2. Owns: <code>docs/format.md</code>, <code>src/&lt;pkg&gt;/types.py</code>, <code>tests/fixtures/example.&lt;ext&gt;</code>, <code>tests/fixtures/example-extended.&lt;ext&gt;</code>, <code>tests/test_types.py</code>. Acceptance: <code>docs/format.md</code> states header keys, the three kinds with source tags, <code>seen+</code>, the segment-association rule, continuation, chapter headings, the additive rule, <code>completion</code> values, and the version rule, with the example from section 3; <code>types.py</code> defines <code>Segment</code>, <code>Frame</code> (id, time to the tenth, kind), <code>Description</code>, <code>Usage</code>, <code>LedgerEntry</code>, <code>StageResult</code>, and the <code>Source</code> protocol with JSON round-trip tests; the extended fixture adds <code>seen+</code> lines and a new kind and a reader counting primary frames returns the same count; a fresh sonnet given only <code>docs/format.md</code> and the fixture answers three grep-style questions correctly (probe transcript on the PR). Delegate: fable; reviewer: Sol.</p>
+<p><strong>4. Config schema and output-path resolution.</strong> M0. Blocked by: 2. Owns: <code>src/&lt;pkg&gt;/config.py</code>, <code>tests/test_config.py</code>, <code>docs/config.md</code>. Acceptance: one frozen schema covering output root, providers and models per stage, detail level, frames per call, frame interval, width, budget, timeouts, concurrency, glossary path, cache dir; precedence CLI flag &gt; <code>FRAMEWEAVE_*</code> env &gt; <code>~/.config/frameweave/config.toml</code> &gt; default, one test per control; <code>FRAMEWEAVE_OUT</code> has no default: the output root is read from the environment or a <code>.env</code> next to the working directory or under <code>~/.config/frameweave/</code>, and when unset <code>doctor</code> fails and <code>run</code> exits 1 with the exact line to add (Q20, decision 39); <code>.env.example</code> in the repo lists every variable with a one-line purpose and a placeholder path; <code>output_dir(root, channel, slug, range_slug)</code> returns <code>&lt;root&gt;/&lt;channel-slug&gt;/&lt;video-slug&gt;[/&lt;range-slug&gt;]</code> with no extra level; a <code>--out</code> path is used exactly; slugify is deterministic and tested against the six channel names in Doug's output folder; the run key is a stable hash of the artifact-affecting subset and changes when any of them changes (test). Delegate: composer.</p>
+<p><strong>5. Preflight (<code>doctor</code>).</strong> M0. Blocked by: 2, 4. Owns: <code>src/&lt;pkg&gt;/preflight.py</code>, <code>tests/test_preflight.py</code>. Acceptance: collects <code>preflight_checks()</code> from every module; checks ffmpeg and ffprobe with versions, yt-dlp against the lock pin, the API key for each configured provider, cache dir and output root writable, optional extras present; one row per check with a remediation command; exit 1 if any required row fails, 0 otherwise, proven by tests that stub PATH and env (the "exit 1 while printing All checks passed" regression). Delegate: composer.</p>
+<p><strong>6. YouTube resolve and fetch with client chain.</strong> M1. Blocked by: 3. Owns: <code>src/&lt;pkg&gt;/sources/youtube.py</code>, <code>tests/test_source_youtube.py</code>, <code>tests/recorded/youtube/</code>. Acceptance: <code>resolve</code> returns every field in <code>resolved.json</code> including links parsed from the description; <code>fetch</code> tries the chain in order and a fake yt-dlp that 403s the first two proves the third is used and logged; partial files are ignored and deleted; a cached file with matching sha256 is reused with zero yt-dlp calls; the source lock blocks a second concurrent fetch (test with two processes); media that ffprobe rejects fails with the named error. Delegate: grok; reviewer: Sol.</p>
+<p><strong>7. Local file and direct URL sources.</strong> M1. Blocked by: 3. Owns: <code>src/&lt;pkg&gt;/sources/local.py</code>, <code>src/&lt;pkg&gt;/sources/http.py</code>, <code>tests/test_source_local.py</code>, <code>tests/test_source_http.py</code>. Acceptance: a local file resolves title from filename, duration from ffprobe, id from sha256, and is copied into the source cache so relocation of the original does not matter; an HTTP source checks content type and magic bytes and on an HTML body fails with the "download it in your browser and pass the file" message; a signed URL is fetched with its query string intact and its secrets redacted from <code>meta.json</code>; both cache under the sha256 id. Delegate: composer.</p>
+<p><strong>8. Captions fetch and per-line dedup.</strong> M1. Blocked by: 3. Owns: <code>src/&lt;pkg&gt;/captions.py</code>, <code>tests/test_captions.py</code>, <code>tests/fixtures/captions-tripled.json</code>, <code>tests/fixtures/captions-manual.vtt</code>. Acceptance: prefers a manual track, then auto, without downloading media; HTTP 429 returns <code>captions.none</code> with a reason and never raises; the tripled rolling-cue fixture yields each line once and its word count is within 2% of the manual fixture; segments are 20-40 s cut at sentence ends with ids and <code>source</code>; both json3 and vtt shapes are tested. Delegate: Sol.</p>
+<p><strong>9. STT: audio extraction and local WhisperX.</strong> M1. Blocked by: 3. Owns: <code>src/&lt;pkg&gt;/stt/base.py</code>, <code>src/&lt;pkg&gt;/stt/local.py</code>, <code>src/&lt;pkg&gt;/stt/audio.py</code>, <code>tests/test_stt_local.py</code>. Acceptance: 16 kHz mono extraction; the backend runs WhisperX large-v3-turbo from the tool's own uv environment (the <code>local-stt</code> extras group from item 2; weights under the cache dir, <code>doctor</code> prints the download command when missing) with <code>--device</code> from config (cpu default, mps when the spike shows it is faster); long audio chunked with 2 s overlap, segment timestamps rebased and overlap deduped across a two-chunk fixture; segments carry <code>source: stt-whisperx</code>, per-word times and scores, a quality score, and an optional <code>speaker</code>, with bounds clamped to words and edge words over 0.9 s capped; silent audio (the synthetic case, and chunk 0 of the kickoff folder as a real one, skipped when absent) yields an empty transcript and <code>completion: incomplete</code>; the synthetic fixture transcribes with network disabled; ledger records audio seconds and wall clock at $0. Delegate: Sol.</p>
+<p><strong>10. Frame planner and extractor.</strong> M1. Blocked by: 3. Owns: <code>src/&lt;pkg&gt;/frames.py</code>, <code>tests/test_frames.py</code>, <code>tests/make_synthetic.py</code> (ffmpeg testsrc with burned-in timecode, generated, not committed). Acceptance: planner implements the budget rule in section 2 and is tested on three synthetic segment lists: starts fit with room for extras, starts fit exactly, starts exceed the budget (windows merge and the final window is covered); the 4m41s case gets 7 frames at 45 s; frames are named <code>f&lt;id&gt;-HH-MM-SS.t.jpg</code> at 1280 px; a pixel check against a reference render proves the extracted frame is at the requested time. Delegate: composer; reviewer: Sol.</p>
+<p><strong>11. Vision interface, subscription CLI backends, and the Gemini API backend.</strong> M1. Blocked by: 3. Owns: <code>src/&lt;pkg&gt;/vision/base.py</code>, <code>src/&lt;pkg&gt;/vision/cli.py</code> (codex and claude lanes behind one subprocess adapter), <code>src/&lt;pkg&gt;/vision/gemini.py</code>, <code>src/&lt;pkg&gt;/vision/prompt.md</code>, <code>tests/test_vision_cli.py</code>, <code>tests/test_vision_gemini.py</code>, <code>tests/recorded/vision/</code>. Acceptance: <code>describe(batch, context) -&gt; list[Description]</code> plus <code>Usage</code> (tokens parsed from each CLI's own report: codex's trailing <code>tokens used</code> line, Claude's <code>--output-format json</code> usage block; calls and wall clock; dollars $0 on a subscription lane); <code>prompt.md</code> asks for a short description and an exact-string list per frame id, states that numbers are transcribed not inferred, and asks for "illegible" rather than a guess; the CLI adapter attaches frames as files (<code>codex exec -m &lt;model&gt; -c model_reasoning_effort=low -i ... -- prompt &lt; /dev/null</code>; <code>claude -p --model sonnet --allowedTools Read --output-format json</code>), parses the JSON object out of the reply, and treats a non-JSON reply as a retryable failure; recorded tests cover a normal batch, a quota or 429 then success, three failures then the remedies message, a timeout, and a response that omits, duplicates, or reorders ids (rejected and retried once); lane, model, tier, and detail come from config, not constants, and the codex lane's model is never the CLI's configured default. Delegate: Sol; fable reviews the prompt once. Lane selection is item 26; each lane's model is set by item 21.</p>
+<p><strong>12. Transcript writer and sidecars.</strong> M1. Blocked by: 3. Owns: <code>src/&lt;pkg&gt;/format/writer.py</code>, <code>tests/test_writer.py</code>. Acceptance: given fixture stage artifacts the output equals the example fixture byte for byte; extra frames render as <code>seen+</code>; <code>meta.json</code> includes every field named in section 3; <code>completion</code> derives from the transcript and warnings; a relocated copy of the folder has no broken references (test moves it). Delegate: composer.</p>
+<p><strong>13. README generator.</strong> M1. Blocked by: 3. Owns: <code>src/&lt;pkg&gt;/format/readme.py</code>, <code>src/&lt;pkg&gt;/format/mangles.toml</code>, <code>tests/test_readme.py</code>. Acceptance: sections in the order in section 3; trust table has one row per kind plus frames; the mangling table shows only entries whose mangled form occurs in the transcript (fixtures with and without "codecs"); <code>--glossary</code> adds rows; limits and provenance render from <code>meta.json</code> and <code>cost.json</code> fields only. Delegate: sonnet; fable reviews copy once.</p>
+<p><strong>14. Pipeline, run keys, ledger, cleanup.</strong> M1. Blocked by: 6, 7, 8, 9, 10, 11, 12. Owns: <code>src/&lt;pkg&gt;/pipeline.py</code>, <code>src/&lt;pkg&gt;/ledger.py</code>, <code>tests/test_pipeline.py</code>, <code>tests/fakes/*.py</code> (fake source, STT, vision that count calls). Acceptance: stage registry runs in order with artifacts under the run key; a second identical run makes zero provider calls; changing frame interval reruns stages 5-7 only; <code>--redo &lt;stage&gt;</code> reruns it and its dependents; the request-level ledger persists after each call and <code>cost.json</code> reports current, reused, and unknown dollars from the dated rate table (<code>ledger.py</code> is the one home for rates); a forced kill (SIGKILL) mid-stage leaves a pending obligation that the next start reconciles (delete call count equals upload count across success, failure, SIGINT, and SIGKILL); a SIGINT leaves no temp files. Delegate: Sol.</p>
+<p><strong>15. CLI <code>run</code> and <code>inspect</code>.</strong> M1. Blocked by: 4, 5, 13, 14. Owns: <code>src/&lt;pkg&gt;/cli.py</code>, <code>tests/test_cli.py</code>. Acceptance: <code>cli.py</code> collects <code>cli_flags()</code> from modules; <code>inspect &lt;input&gt;</code> is the estimate-before-proceeding step (Q10, decision 34): it prints resolved facts, caption availability, the frame plan upper bound, tokens and quota projection per lane, and dollars only if the run would fall to the metered API, then exits 0 without spending; before either command, free disk under <code>FRAMEWEAVE_DISK_WARN_GB</code> (default 10) prints a warning with the cache size and the prune command and continues (decision 35); <code>run</code> prints the same before stage 2, then per-stage progress lines, then the actual frame plan after stage 4, and ends with the absolute output path and <code>cost: $0.0xx</code>; exit codes: 0 complete, 2 incomplete speech, 1 error; an end-to-end test on the synthetic video with fakes produces every file in section 2. Delegate: grok.</p>
+<p><strong>16. Range and chapter selection.</strong> M1. Blocked by: 15. Owns: <code>src/&lt;pkg&gt;/range.py</code>, <code>tests/test_range.py</code>. Acceptance: <code>--start/--end</code> accept <code>HH:MM:SS</code>, <code>MM:SS</code>, and seconds; <code>--chapter</code> matches by prefix, errors with the list when ambiguous, and outranks a URL <code>?t=</code>; segments and frames filter to the window; <code>--frame-interval 15</code> overrides for the run; output goes to <code>&lt;slug&gt;/&lt;range-slug&gt;/</code>; a second chapter run on the same video makes zero fetch calls and gets a distinct run key. Delegate: composer.</p>
+<p><strong>17. Agent skill.</strong> M1. Blocked by: 16. Owns: <code>skills/frameweave/SKILL.md</code>, <code>skills/frameweave/README.md</code>. Acceptance: written to the fleet universal shape (frontmatter <code>name</code> equals the directory, <code>description</code> is trigger keywords); steps are <code>doctor</code>, then <code>run</code> backgrounded with a poll on the progress lines so a 40-minute video survives a harness's 10-minute foreground limit, then read the README, then answer; never passes <code>--out</code>; passes <code>--vision claude</code> or <code>--vision codex</code> only when the user names the lane ("use Claude"), otherwise lets the chooser decide; passes <code>--speakers</code> when the user says the recording is a meeting or names more than one speaker; when the user asks for an estimate or cost first, runs <code>inspect</code> and stops; reports the absolute path and cost from the last two lines; fresh-context probes in Claude Code and in Codex each produce the right command and read the right file (transcripts on the PR); passes the <code>writing-for-agents</code> audit pass. Installation is a symlink from <code>skills/frameweave/</code> into <code>~/.claude/skills/</code>, with the line in the README; fleet issue #84 asks fleet to list it as an external skill (Q8). Delegate: fable.</p>
+<p><strong>18. M1 acceptance run.</strong> M1. Blocked by: 17, 21, 26. Owns: <code>docs/runs/m1-acceptance.md</code>, <code>docs/decisions.md</code> (new rows only). Acceptance: one whole captioned video, one chapter, one captionless local file (the 33-minute stitched kickoff recording with <code>--speakers</code>, decision 45), and one direct URL run end to end with real keys by a verifier who built none of the items; folders land under the configured root; the whole video costs $0 on a subscription lane and the pre-spend block shows the lane projection; the captionless run exits 0 with <code>stt-whisperx</code> segments; an interrupted run resumes; a fresh sonnet given only a folder answers "what tools did he use and how did he connect them" with frame paths cited; measured tokens per frame and cost are logged as a decision row. Needs your eyes: Doug reads one README and says whether the trust table reads right. Delegate: Sol as verifier; main session logs.</p>
+<p><strong>19. Hosted STT (whisper-1, Groq), optional.</strong> M2. Blocked by: 14, 21. Owns: <code>src/&lt;pkg&gt;/stt/openai.py</code>, <code>src/&lt;pkg&gt;/stt/groq.py</code>, <code>tests/test_stt_openai.py</code>, <code>tests/test_stt_groq.py</code>, <code>tests/recorded/stt/</code>. Acceptance: each backend behind the same interface with <code>--stt</code>; recorded responses prove segment timestamps; chunking respects the provider's upload limit (25 MB, 100 MB); a comparison artifact shows price, wall clock, and drift versus local WhisperX; <code>doctor</code> reports the key present or absent. Starts only when a key exists (Q6). Delegate: grok; Sol validates timing.</p>
+<p><strong>20. OpenAI API vision backend, optional.</strong> M2. Blocked by: 11. Owns: <code>src/&lt;pkg&gt;/vision/openai.py</code>, <code>tests/test_vision_openai.py</code>, <code>tests/recorded/openai-vision/</code>. Acceptance: same interface; model and detail from config; usage with reasoning tokens captured; provenance renders as <code>seen/gpt-5-mini</code>; the pipeline test passes with it as the fake target; separate cost rows. Starts only when an OpenAI key exists (Q6). Delegate: composer.</p>
+<p><strong>21. Vision lane and STT bake-off spike.</strong> M1, parallel with 6-13. Blocked by: 2 (a decision row to write to). Samples fixed by Q6: Theo <code>turn-off-claude-codes-memory</code>, Theo <code>i-need-you-to-hear-me-out-its-really-good</code>, and the two-chapter <code>gpt-6-astra-is-a-freak</code> run. Owns: branch <code>spike/provider-fit</code> only, plus one row in <code>docs/decisions.md</code> on main. Acceptance: per the fleet <code>spike</code> skill; the six measurements in section 4 with raw replies, <code>ai-usage</code> before-and-after readings, and usage receipts attached; the lock rule applied; <code>config/lanes.toml</code> with the fitted coefficients per lane and model and the held-out check; one <code>accepted</code> row naming each lane's model and tier, the metered fallback, <code>--vision-quality high</code>, frames per call, and the local STT device, or an <code>open</code> row saying nothing qualified. Metered spend under $1 (Gemini key only). Delegate: Sol runs the metered and codex measurements; a sonnet subagent runs the Claude lane so the builder family is not judging itself; fable reads the table and writes the row.</p>
+<p><strong>22. Near-duplicate frame suppression.</strong> M2. Blocked by: 10. Owns: <code>src/&lt;pkg&gt;/dedupe.py</code>, <code>tests/test_dedupe.py</code>, <code>tests/fixtures/frames-small-change/</code>. Acceptance: registered as an optional step after extraction via the stage registry (one-line registration in <code>pipeline.py</code> is the only outside edit and is stated in the issue); a difference hash drops a frame near the last kept one; <code>--keep-duplicates</code> disables it; fixtures where only a file name, a digit, or a tab title changes between frames are all kept (gate); on a static synthetic video 80 candidates become 3 or fewer; dropped frames stay in <code>frames.json</code> as <code>dropped: near-duplicate</code> and <code>meta.json</code> stats say "N of M kept"; cost savings are reported from measurement, not predicted. Delegate: composer; Sol reviews the fixtures.</p>
+<p><strong>23. <code>frames-only</code>, <code>cache prune</code>, PO-token hook.</strong> M2. Blocked by: 15, 6. Owns: <code>src/&lt;pkg&gt;/cache.py</code>, <code>src/&lt;pkg&gt;/sources/potoken.py</code>, <code>docs/youtube.md</code>, <code>tests/test_cache.py</code>, <code>tests/test_potoken.py</code>. Acceptance: <code>--frames-only</code> skips stages 4 and 6, sets <code>completion: complete (speech not requested)</code>, exits 0; <code>cache prune --older-than 30d</code> reports sizes and deletes only sources with no pending obligations; <code>cache size</code> prints the total and <code>doctor</code> repeats the low-disk warning from item 15 with the same threshold; when <code>FRAMEWEAVE_POT_PROVIDER</code> is set the mweb client joins the chain with the plugin configured and <code>doctor</code> shows whether the provider answers; unset, the chain order is unchanged (regression test). Delegate: composer. The PO-token part starts only after the android client fails on two consecutive real runs.</p>
+<p><strong>24. Faster local STT (<code>mlx-whisper</code>) and midpoint sampling for talking heads.</strong> M3. Blocked by: 9, 10, 21. Owns: <code>src/&lt;pkg&gt;/stt/mlx.py</code>, <code>src/&lt;pkg&gt;/frames_midpoint.py</code>, <code>tests/test_stt_mlx.py</code>, <code>tests/test_frames_midpoint.py</code>. Acceptance: <code>--stt mlx</code> behind the same interface, installed from the existing extras group, measured against item 9 on the same file (the spike's number is the bar); <code>--sample midpoint</code> takes frames at the midpoint of the longest segments instead of starts, the voice-lab pattern for content where the speaker is the picture; both register through the existing seams. Starts only if the spike shows WhisperX on MPS is not already fast enough. Delegate: grok.</p>
+<p><strong>25. Whole-video deep pass.</strong> M3. Blocked by: 20, 14. Owns: <code>src/&lt;pkg&gt;/deep.py</code>, <code>tests/test_deep.py</code>. Acceptance: <code>--deep</code> registers a stage that chunks media at keyframes into pieces of 13 minutes or less, uploads to Gemini, describes motion and events between frames, rebases timestamps by the actual decoded chunk offsets, records upload ids as obligations before each request, and merges results as <code>seen/deep</code> lines; delete count equals upload count on success, failure, SIGINT, and SIGKILL-then-restart. Delegate: Sol.</p>
+<p><strong>26. Usage-aware lane chooser.</strong> M1. Blocked by: 11, 15, 21. Owns: <code>src/&lt;pkg&gt;/vision/choose.py</code>, <code>config/lanes.toml</code>, <code>tests/test_choose.py</code>, <code>tests/fixtures/usage-snapshot/</code>. Acceptance: implements the four chooser steps in section 4; <code>choose(plan, snapshot, coefficients) -&gt; Choice</code> is pure and tested on snapshot fixtures: both lanes open (picks the larger projected long-window headroom), one lane crossing the skip line on its 5-hour window (skips it; the line is <code>FRAMEWEAVE_LANE_SKIP_PERCENT</code>, default 90, and a fixture at 75 proves the env var is read), both crossing (returns the metered fallback with a reason), snapshot missing or older than 2 minutes and the refresh script absent (codex with a warning), <code>--vision claude</code> or <code>--vision codex</code> set (no choice is made: that lane is used even past the skip line, and the projection is still printed); the projection table appears in <code>inspect</code> and in <code>run</code>'s pre-spend block with tokens, dollars, and percent per window per lane; after a run <code>cost.json</code> carries actual tokens per frame and the quota delta, and a helper recomputes the coefficients as the median over the last ten <code>cost.json</code> files; a snapshot with a <code>limit.*</code> Fable row proves that row is never read as sonnet headroom. Delegate: composer; Sol verifies against a hand-computed table.</p>
+<p><strong>27. Speaker labels.</strong> M1. Blocked by: 9, 12. Owns: <code>src/&lt;pkg&gt;/stt/speakers.py</code>, <code>tests/test_speakers.py</code>, <code>tests/fixtures/two-speakers/</code>. Acceptance: <code>--speakers</code> (off by default) runs WhisperX diarization (pyannote, <code>HF_TOKEN</code> from <code>.env</code>; <code>doctor</code> reports the token and the accepted model terms, and the run exits 1 with the link when either is missing); segments get <code>speaker: S1..Sn</code>; the writer renders <code>said/stt-whisperx S1: ...</code> and adds a <code>speakers: n</code> header line, and the README lists the speakers with their first-utterance time so a reader can map S1 to a name; a two-speaker fixture, a 60 s clip cut from the wrap-up chunk of Doug's kickoff recording folder (decision 45; the clip and the folder stay out of git, the test skips when the path is absent), yields two labels with the turn boundaries within 1 s of hand-marked truth; without the flag the output is byte-identical to a run before this item (regression test). Voice-lab already runs this exact pipeline, so the setup is a copy of a known-good invocation, not research. Delegate: Sol.</p>
+<h2>8. Risks and unknowns</h2>
+<ul>
+<li><strong>GPT-5 mini may not read 1280 px UI text.</strong> The provisional default rests on a guess; the spike's absolute floor settles it before item 11's model constant is set, and the interface makes the swap a config value.</li>
+<li><strong>High-detail token count per frame is unverified.</strong> A 2x error moves a 30-minute run from $0.06 to $0.09; a per-model downscale cap that destroys legibility would be the real problem and shows up in the spike's recall score.</li>
+<li><strong>The android client can stop working</strong> as PO-token enforcement expands. Item 23 is the prepared answer; the failure is a named error, never a hang.</li>
+<li><strong>Caption 429s from Doug's IP</strong> were seen twice in one session. The M1 path is whisper-1 at $0.18 per 30 minutes until item 19 qualifies a cheaper route.</li>
+<li><strong>Rolling-cue dedup</strong> depends on the caption shape yt-dlp returns; item 8 tests json3 and vtt.</li>
+<li><strong>Frames shown under about 40 s can still be missed.</strong> The README says so; a scene-change trigger (ffmpeg scene detection as extra sample points) is an M3 candidate if Doug hits it again.</li>
+<li><strong>Client recordings and privacy.</strong> Audio stays local; frames go to whichever subscription lane the chooser picks (OpenAI or Anthropic). Q7 decides whether a client run needs <code>--vision none</code>.</li>
+<li><strong>uv acceptance</strong> (Q5). If uv is out, only item 2 changes.</li>
+</ul>
+<p>Q1-Q6 are settled (2026-09-16); item 1 can start now and the spike (21) is next.</p>
+<h2>9. Questions for Doug</h2>
+<p>Logged in <code>docs/questions.md</code>. Round one (Q1-Q6, Q12, Q17, Q18) was answered 2026-09-16 and is recorded as decisions 22-30; the rest proceed on their assumptions until round two.</p>
+<h2>10. Deliberately left out</h2>
+<ul>
+<li>Whole-video understanding as the default: it caused every timeout, chunk, orphan, and 290-tokens-per-second cost in the audit, and the transcript no longer comes from it.</li>
+<li>Interactive confirmation before spend: agents run the tool non-interactively; the printed estimate and <code>--dry-run</code> replace it.</li>
+<li>A <code>compare</code> or summarize command: the consumers are agents and the format is designed for grep.</li>
+<li>Turntable, contact sheets, compositing, booklet imposition: those sessions never used the analyzer.</li>
+<li>Speaker diarization, translation, a separate OCR stage: no session asked; <code>text:</code> lines cover on-screen text.</li>
+<li>Anthropic, Deepgram, AssemblyAI providers: 4-20x the price for this job with no quality evidence.</li>
+<li>Batch APIs and context caching: 50% off a six-cent run is not worth the code.</li>
+<li>Per-run spend caps, budget reservation, destination locks: no counted failure behind them (Q10 if Doug wants a cap anyway).</li>
+<li>A GUI, daemon, or web view: the output folder is the product.</li>
+<li>Editing the fleet repo from this plan: the skill lives here; fleet vendoring is an owner-run issue.</li>
+</ul>
+<h2 id="roundtable">Roundtable outcome (2026-09-15)</h2>
+<p>Reviewers: Fable 5.1 (Agent tool, fresh context, drafted plan A then reviewed plan B: 18 findings), GPT-6 Astra (codex exec, reasoning high, drafted plan B then reviewed plan A: 20 findings). Both seats completed. Verdicts disagreed on which shape to start from (Fable: start from A, graft B's rigor; Astra: start from B, keep A's spike and probe) and agreed on nearly every specific fix. The lead started from A's wave structure and B's artifact rigor. Every finding is below, cited <code>F n</code> (Fable on B) or <code>A n</code> (Astra on A). Final pass: skipped.</p>
+<h3>Accepted</h3>
+<ul>
+<li><strong>M0 skeleton owns deps and CI; spike gates constants only</strong> (F4, F5, F6, F7, A5): items 2 and 21; item 11 takes its model from item 21's row; item 18 blocked by 21.</li>
+<li><strong>Freeze only the format, shared types, and the Source protocol</strong> (F9, A6): item 3; item 15 blocked on all three sources through item 14.</li>
+<li><strong>Skill lives in the tool repo, universal shape, probed in two harnesses</strong> (F11, A2 in part): item 17; fleet vendoring is Q8 and owner-run.</li>
+<li><strong>Existing Desktop root is the working assumption</strong> (F12): section 2, Q2.</li>
+<li><strong>whisper-1 is the M1 no-captions path; cheap STT is M2 after qualification</strong> (F14, A1): items 9 and 19.</li>
+<li><strong>Mini in the ladder, 920-token derivation stated, absolute quality floor plus cheapest-within-5</strong> (F13, A18): section 4 lock rule.</li>
+<li><strong>Completion header and exit 2</strong> (F16): section 3, items 12 and 15.</li>
+<li><strong>Cleanup obligations persisted before the request, reconciled at start, SIGKILL test</strong> (F17, A12): section 2, items 14 and 25.</li>
+<li><strong>Timeout errors name the remedies</strong> (F2): item 2.</li>
+<li><strong>Harness foreground limit</strong> (F3): item 17 backgrounds the run and polls; item 15 prints per-stage progress.</li>
+<li><strong>Mangles seed list plus glossary, filtered to occurrences</strong> (F1): item 13.</li>
+<li><strong>Local whisper named</strong> (F8): item 24 names <code>mlx-whisper</code> and the weights path; <code>doctor</code> owns the remediation.</li>
+<li><strong>CLI split</strong> (F10): item 15 ships <code>run</code> and <code>inspect</code>; item 23 adds <code>frames-only</code> and <code>cache prune</code>.</li>
+<li><strong>Full config schema frozen in M0 with a test per control</strong> (A3): item 4.</li>
+<li><strong>Verifier distinct from builder on every item</strong> (A4): backlog rules.</li>
+<li><strong>Extension seams so later items own their edits</strong> (A7): stage registry, <code>cli_flags()</code>, <code>preflight_checks()</code>, README from meta; item 22's one registration line is stated.</li>
+<li><strong>Frame budget algorithm when starts exceed the cap</strong> (A8): section 2 windows rule; item 10 tests all three cases.</li>
+<li><strong>Run keys include every artifact-affecting setting</strong> (A9): section 2, items 4 and 14.</li>
+<li><strong>Source lock and per-run namespaces</strong> (A10 in part): section 2, item 6.</li>
+<li><strong>Request-level ledger with current, reused, unknown</strong> (A11, A17): section 3, item 14; the constant-tokens-per-second test is dropped.</li>
+<li><strong><code>seen+</code> and range-based segment association</strong> (A13): section 3, item 3's extended fixture.</li>
+<li><strong>Frame ids through responses, tenth-second names, reject bad associations</strong> (A14): section 2, items 10 and 11.</li>
+<li><strong>Pre-download output is a labeled estimate; the actual plan prints after stage 4</strong> (A15): item 15.</li>
+<li><strong>Dedupe gated on small-change fixtures; savings measured not predicted</strong> (A16): item 22.</li>
+<li><strong>Batch-size matrix and early reader probe kept</strong> (A19, A20): section 4, item 3.</li>
+<li><strong>Wave-parallel ownership</strong> (F18): backlog shape.</li>
+</ul>
+<h3>Rejected or narrowed</h3>
+<ul>
+<li><strong>Budget reservation, per-run spend cap, destination locks</strong> (F15 accepted; A10 narrowed): no session ran two analyses at once and the default run costs cents. The source download lock stays because two chapter runs of one video in one wave is the plan's own execution model; distinct run keys make destination locks unnecessary; a cap is Q10.</li>
+<li><strong>Universal skill built in a fleet worktree</strong> (A2 narrowed): fleet's config-mutation gate makes another checkout owner-run; the skill is written to the universal shape here and vendoring is a separate owner issue.</li>
+<li><strong>Freeze all provider interfaces in M0</strong> (implicit in B03, rejected per F9): the pricing file shows the usage and timestamp fields are not knowable at freeze time; each backend owns its file and the shared seam is <code>types.py</code> plus <code>util/retry.py</code>.</li>
+</ul>
+<h3>Owner note, applied 2026-09-15 after the roundtable</h3>
+<p>Doug: prefer a vision route "included with subscription pricing vs having to pay Gemini each frame". Applied as: subscription CLI lanes (codex, Claude Code, Gemini CLI) are first-class vision backends and the spike ranks them ahead of metered APIs. Verified the same day on a real 1280x720 screen-recording frame: Claude Code on sonnet (<code>claude -p --allowedTools Read</code>) and codex (<code>codex exec -i frame.jpg -- prompt &lt; /dev/null</code>, 25 s, default tier at low effort) both returned JSON with the on-screen strings quoted, and codex flagged the illegible chat text; the two disagreed on a few usernames, which is what the spike's hand labels will score. Gemini CLI needs an eligible login (Q17). Also applied from the voice-lab pass (<code>docs/audit/2026-09-15-voice-lab-borrow.md</code>): no OpenAI or Groq key exists on this Mac, so hosted STT moves to optional M2 and local WhisperX (proven install, about realtime here) is the M1 captionless path. Items 9, 11, 19, 20, 21, 24 and sections 1, 2, 4 changed.</p>
+<h3>Owner note, applied 2026-09-16 after interview round one</h3>
+<p>Doug answered Q1-Q6, Q12, Q17, Q18 (decisions 22-30). Name <code>frameweave</code>, MIT, uv, nested range dirs, the existing output folder, public GitHub remote gated by an out-of-repo scrub list, Gemini CLI dropped for good. On Q18 he asked for something better than a fixed default: "if we can come up with a solid estimate of how many tokens it costs for a video with x frames and y mins long on codex and claude, then the agent running the analysis of the video will be able to check the current usage and choose between the two", with Fable and GPT-6 Astra named as the coveted pools. Applied as: the spike's sixth measurement fits a per-lane token and quota model on the three samples; new item 26 is a pure chooser that reads the <code>ai-usage</code> snapshot and projects each lane's windows; the codex lane runs a cheaper model than the CLI's configured gpt-6-astra default and the Claude lane is sonnet only; <code>cost.json</code> recalibrates the estimate every run. Verified today: codex reports <code>tokens used</code> per call (15,229 for the one-frame smoke test) and the usage snapshot exposes the Fable weekly cap as its own row, so sonnet headroom can be read without touching it. Items 1, 11, 21 and sections 1, 2, 3, 4 changed; item 26 added.</p>
+<h3>Owner note, applied 2026-09-16 after interview round two</h3>
+<p>Doug answered Q7-Q11, Q13, Q14, Q19-Q21 (decisions 31-41). Applied: <code>--vision none</code> as the opt-out, frames on by default; the skill is symlinked from this repo and fleet issue #84 asks fleet to list it as an external skill; <code>inspect</code> is the estimate-before-proceeding step and prints tokens, quota projection, and dollars only on the metered path; a low-disk warning (<code>FRAMEWEAVE_DISK_WARN_GB</code>, default 10) before runs and in <code>doctor</code>; speaker labels as <code>--speakers</code> in M1 (new item 27) because a client kickoff meeting needs "who said what", reusing voice-lab's pyannote setup and Hugging Face token; the output folder was renamed <code>frameweave</code> on the Desktop today with the channel folders moved in, and the path lives only in <code>.env</code> as <code>FRAMEWEAVE_OUT</code> with no default; the chooser's skip line is <code>FRAMEWEAVE_LANE_SKIP_PERCENT</code> and an explicit lane bypasses the choice. On Q9 Doug asked whether 80 frames is per duration or flat: it was flat and the plan now scales it, <code>max(80, 2 * duration_minutes)</code>, recorded as assumed (decision 41) for round three. Items 4, 9, 15, 17, 23, 26 and section 2 changed; item 27 added.</p>
+<h3>Owner note, applied 2026-09-16 after interview round three</h3>
+<p>Doug answered Q22, Q23, Q15, Q16 (decisions 42-46). The duration-scaled frame budget is accepted. The speaker fixture, the real silent-audio case, and the M1 acceptance local-file run all come from his kickoff recording folder, which never enters git. The whole-video pass stays parked; the old fork is archived after M1. The working directory was renamed <code>~/projects/frameweave</code> and the docs were checked clean. No open questions remain; item 1 starts on his go.</p>
+<h2 id="questions">Questions for Doug</h2>
+<p>Each answer becomes an <code>accepted</code> row in <code>docs/decisions.md</code> and supersedes its assumption. Until then the plan proceeds on the assumption.</p>
+<h2>Round one, answered 2026-09-16 (decisions 22-30)</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>question</th>
+<th>answer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Name, extension, header</td>
+<td>B: <code>frameweave</code>, <code>transcript.fwv</code>, <code>frameweave 1</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Output root</td>
+<td>keep the existing Desktop folder; see Q20 for its name</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Chapter and range runs</td>
+<td>nested <code>&lt;video-slug&gt;/&lt;range-slug&gt;/</code> for now</td>
+</tr>
+<tr>
+<td>4</td>
+<td>License</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>5</td>
+<td>uv as the runtime manager</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Bake-off samples and spend</td>
+<td>yes; two Theo videos of my choosing (<code>turn-off-claude-codes-memory</code>, <code>i-need-you-to-hear-me-out-its-really-good</code>) and the two-chapter <code>gpt-6-astra-is-a-freak</code> run; under $1 metered</td>
+</tr>
+<tr>
+<td>12</td>
+<td>GitHub remote</td>
+<td>yes, public from the start, as long as the earlier tool is never referenced in it</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Gemini CLI lane</td>
+<td>dead; Gemini elsewhere is SDK and API only</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Default vision lane</td>
+<td>no fixed default: estimate tokens per video from frames and minutes on each lane, read current usage, choose per run; Fable and GPT-6 Astra are the coveted pools, sonnet has room</td>
+</tr>
+</tbody>
+</table>
+<h2>Round two, answered 2026-09-16 (decisions 31-41)</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>question</th>
+<th>answer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>7</td>
+<td>Client recordings</td>
+<td>speech local; frames on by default with <code>--vision none</code> to turn them off</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Skill install</td>
+<td>symlink from this repo; fleet issue #84 filed for an external-skills reference</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Frame defaults</td>
+<td>80 is fine; asked whether that is flat or per duration. It was flat; now <code>max(80, 2 * duration_minutes)</code>, confirm in round three (Q22)</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Spend cap</td>
+<td>none; <code>inspect</code> shows the token and dollar estimate first when asked, otherwise print and proceed</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Cache retention</td>
+<td>explicit prune, plus a low-disk warning so the prune happens before disk runs out</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Language and speakers</td>
+<td>English only; speaker labels as a flag, off for single-speaker tech videos, on for client meetings; in M1</td>
+</tr>
+<tr>
+<td>14</td>
+<td>README shape</td>
+<td>the plan's shape</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Local STT speed</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Output folder</td>
+<td>moved to a Desktop <code>frameweave</code> folder (done 2026-09-16); the path lives in <code>.env</code>, hard-coded nowhere</td>
+</tr>
+<tr>
+<td>21</td>
+<td>Chooser policy</td>
+<td>equal weighting; env var for the skip percent; an explicit "use Claude" makes no choice</td>
+</tr>
+</tbody>
+</table>
+<h2>Round three, answered 2026-09-16 (decisions 42-46)</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>question</th>
+<th>answer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>22</td>
+<td>Frame budget rule</td>
+<td>keep the scaling rule</td>
+</tr>
+<tr>
+<td>23</td>
+<td>Speaker fixture</td>
+<td>cut from the kickoff recording folder on the Desktop; kept out of git</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Whole-video pass</td>
+<td>parked; not critical for M1</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Old fork</td>
+<td>archive after M1</td>
+</tr>
+</tbody>
+</table>
+<p>No open questions. New ones go to <code>docs/decisions.md</code> as <code>open</code> rows.</p>
+<h2 id="decisions">Decision log</h2>
+<p>One line per decision, newest first, written the moment it resolves (fleet <code>decision-record</code> skill). Statuses: <code>accepted</code> | <code>assumed (reopens when: ...)</code> | <code>open</code> | <code>unformed</code> | <code>superseded by N</code>. Rows 1-19 seed the interview from <code>docs/questions.md</code> (same numbers); an answer supersedes its row. Round one (2026-09-16) resolved rows 1-6, 12, 17, 18 into rows 22-30; round two resolved rows 7-11, 13, 14, 19 into rows 31-41; round three resolved rows 15, 16, 41 into rows 42-46. No open questions remain.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>date</th>
+<th>decision</th>
+<th>status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>46</td>
+<td>2026-09-16</td>
+<td>Local working directory renamed <code>~/projects/frameweave</code>; docs carry no reference to the earlier tool's repo, author, or format, and the scrub term list stays outside the repo</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>45</td>
+<td>2026-09-16</td>
+<td>Speaker-label fixture and first real <code>--speakers</code> run come from Doug's kickoff recording folder on the Desktop (path set as <code>FRAMEWEAVE_KICKOFF_DIR</code> in <code>.env</code>, never written in the repo: chunks 1, 2, 4 with audio, 12.5, 3.7, and 16.2 minutes; chunk 0 silent; a 33-minute stitched file). The 60 s two-speaker fixture is cut from the wrap-up chunk by item 27; the silent chunk is item 9's real "no speech" case; the stitched file is the M1 acceptance's local-file run. Nothing from that folder enters git</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>44</td>
+<td>2026-09-16</td>
+<td>The old fork on disk is archived after M1 lands</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>43</td>
+<td>2026-09-16</td>
+<td>Whole-video pass (<code>--deep</code>: the entire video sent to a long-context model, the earlier tool's method) stays parked in M3; not needed for M1</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>42</td>
+<td>2026-09-16</td>
+<td>Frame budget scales with duration: <code>max(80, 2 * duration_minutes)</code>; <code>--max-frames</code> overrides</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>41</td>
+<td>2026-09-16</td>
+<td>Frame budget scales with duration: default <code>max(80, 2 * duration_minutes)</code> frames per run, the same density as Doug's past runs (about two per minute); an explicit <code>--max-frames</code> overrides; frames are never chunked, the budget covers the whole video or range</td>
+<td>superseded by 42</td>
+</tr>
+<tr>
+<td>40</td>
+<td>2026-09-16</td>
+<td>Chooser policy: both subscriptions weighted equally, most 7-day headroom after the run wins; the skip line is <code>FRAMEWEAVE_LANE_SKIP_PERCENT</code> (default 90); an explicit lane (<code>--vision claude</code>, or "use Claude" to the skill) makes no choice at all and only prints the projection</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>39</td>
+<td>2026-09-16</td>
+<td>Output root moves: the Desktop folder is renamed <code>frameweave</code> and the channel folders move with it; the path lives only in <code>.env</code> as <code>FRAMEWEAVE_OUT</code> (with <code>.env.example</code> as the template) and is hard-coded nowhere; a missing value is a <code>doctor</code> failure with the line to add</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>38</td>
+<td>2026-09-16</td>
+<td>Local STT at about realtime is acceptable for M1; the spike measures MPS and mlx-whisper</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>37</td>
+<td>2026-09-16</td>
+<td>The generated README follows the plan's section 3 shape</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>36</td>
+<td>2026-09-16</td>
+<td>English only. Speaker labels are a flag (<code>--speakers</code>), off by default because tech videos are single-speaker, on for client meetings (kickoff with a client describing features, Doug asking questions); WhisperX diarization via pyannote with the Hugging Face token that voice-lab already holds; lands in M1 as its own item</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>35</td>
+<td>2026-09-16</td>
+<td>Cache is pruned only by <code>cache prune</code>, and the tool warns before a run and in <code>doctor</code> when free disk falls under <code>FRAMEWEAVE_DISK_WARN_GB</code> (default 10), printing the cache size and the prune command</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>34</td>
+<td>2026-09-16</td>
+<td>No spend cap. <code>inspect &lt;input&gt;</code> is the "show me the estimate before proceeding" step: tokens per lane, quota projection, and dollars if the run would fall to the metered API; the skill runs it when asked for an estimate. <code>run</code> prints the same and proceeds</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>33</td>
+<td>2026-09-16</td>
+<td>Frame defaults: 80 frames, 45 s interval, same flag names; see 41 for the duration rule</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>32</td>
+<td>2026-09-16</td>
+<td>Skill install: <code>skills/frameweave/</code> in this repo symlinked into <code>~/.claude/skills/</code>; a fleet issue asks for a doc or reference that names this skill as an external skill (filed 2026-09-16)</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>31</td>
+<td>2026-09-16</td>
+<td>Speech stays local. Frames go to the chosen subscription lane by default; <code>--vision none</code> turns the vision stage off for a recording that must not leave the machine</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>30</td>
+<td>2026-09-16</td>
+<td>Vision lane is chosen per run from a measured estimate, not a fixed default. The bake-off produces, per lane and model, tokens and quota-percent per frame and per transcript-minute; at run time the tool reads the <code>ai-usage</code> snapshot, projects each lane's window after the run, and picks the lane with the most headroom left, printing the projection. Models: codex lane never GPT-6 Astra by default (Doug: "gpt-6 is now highly coveted"), the cheapest codex model that passes the recall floor (candidates gpt-5.6-luna, gpt-5.5, gpt-5.6-sol, gpt-5.6-terra at low effort); Claude lane sonnet only, never Fable (its own 7-day cap). Both CLIs report tokens per call (codex prints <code>tokens used</code>; <code>claude -p --output-format json</code> carries usage), so every run's <code>cost.json</code> recalibrates the estimate. <code>--vision &lt;lane&gt;</code> overrides</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>29</td>
+<td>2026-09-16</td>
+<td>Gemini CLI is not a vision lane; Doug's Gemini use elsewhere is SDK and API only. Gemini stays as the metered API fallback (2.5 Flash-Lite)</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>28</td>
+<td>2026-09-16</td>
+<td>GitHub remote <code>dougiefresh49/frameweave</code>, public from the start, on the condition that nothing in the repo references the earlier tool; a scrub check against a term list kept outside the repo gates every push</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>27</td>
+<td>2026-09-16</td>
+<td>Bake-off samples: Theo <code>turn-off-claude-codes-memory</code> (39 min, UI-dense, 78 frames, four chunks in the old run) and Theo <code>i-need-you-to-hear-me-out-its-really-good</code> (31 min, talking-head weighted, 19 frames), plus the two-chapter run <code>gpt-6-astra-is-a-freak</code> (chapters 04:30-09:40 and 21:16-23:18). Metered spend under $1 on the Gemini key; codex and Claude quotas for the subscription lanes</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>26</td>
+<td>2026-09-16</td>
+<td>uv manages the runtime; <code>uv tool install</code> ships the CLI</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>25</td>
+<td>2026-09-16</td>
+<td>License MIT, copyright dougiefresh49</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>24</td>
+<td>2026-09-16</td>
+<td>Chapter and range runs nest under the video folder: <code>&lt;video-slug&gt;/&lt;range-slug&gt;/</code></td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>23</td>
+<td>2026-09-16</td>
+<td>Output root stays the existing Desktop folder that holds the channel folders; <code>FRAMEWEAVE_OUT</code> overrides. The folder's own name carries the earlier tool's abbreviation, raised as Q20</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>22</td>
+<td>2026-09-16</td>
+<td>Product identity option B: <code>frameweave</code>; file <code>transcript.fwv</code>; header <code>frameweave 1</code>; CLI, package, env prefix <code>FRAMEWEAVE_</code>, cache dir, and skill dir take the name</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>21</td>
+<td>2026-09-15</td>
+<td>Vision stage prefers a subscription-backed CLI lane (codex, Claude Code on sonnet, Gemini CLI) over a metered API; the spike ranks lanes by hand-labeled recall then quota use; metered Gemini 2.5 Flash-Lite is the fallback. Owner: "something that is included with subscription pricing vs having to pay Gemini each frame"</td>
+<td>accepted</td>
+</tr>
+<tr>
+<td>20</td>
+<td>2026-09-15</td>
+<td>Captionless speech in M1 is local WhisperX large-v3-turbo (about realtime on this Mac, voice-lab measurement); hosted whisper-1 and Groq are optional M2 items because no OpenAI or Groq key exists here</td>
+<td>assumed (reopens when: an OpenAI or Groq key is added, or the spike shows local STT under 0.5x realtime on MPS is not reachable and a run needs it faster)</td>
+</tr>
+<tr>
+<td>19</td>
+<td>2026-09-15</td>
+<td>Local STT at about 30 minutes wall clock for a 30-minute captionless video is acceptable for M1</td>
+<td>superseded by 38</td>
+</tr>
+<tr>
+<td>18</td>
+<td>2026-09-15</td>
+<td>Default vision lane when both pass the bar: codex, because sonnet quota is shared with delegated agent work</td>
+<td>superseded by 30</td>
+</tr>
+<tr>
+<td>17</td>
+<td>2026-09-15</td>
+<td>Gemini CLI vision lane skipped; headless use fails with an ineligible-account error today</td>
+<td>superseded by 29</td>
+</tr>
+<tr>
+<td>16</td>
+<td>2026-09-15</td>
+<td>The old fork on disk is archived after M1 lands; nothing in this plan reads it</td>
+<td>superseded by 44</td>
+</tr>
+<tr>
+<td>15</td>
+<td>2026-09-15</td>
+<td>Whole-video understanding (<code>--deep</code>) stays parked in M3</td>
+<td>superseded by 43</td>
+</tr>
+<tr>
+<td>14</td>
+<td>2026-09-15</td>
+<td>The generated README follows the plan's section 3 shape, not the exact order of the existing Desktop READMEs</td>
+<td>superseded by 37</td>
+</tr>
+<tr>
+<td>13</td>
+<td>2026-09-15</td>
+<td>English only, no diarization in M1; WhisperX diarization is a later flag</td>
+<td>superseded by 36</td>
+</tr>
+<tr>
+<td>12</td>
+<td>2026-09-15</td>
+<td>GitHub remote <code>dougiefresh49/&lt;name&gt;</code> created private until M1 acceptance; the name is free for all three options</td>
+<td>superseded by 28</td>
+</tr>
+<tr>
+<td>11</td>
+<td>2026-09-15</td>
+<td>Source media cache is pruned only by <code>cache prune</code>, never automatically</td>
+<td>superseded by 35</td>
+</tr>
+<tr>
+<td>10</td>
+<td>2026-09-15</td>
+<td>No per-run spend cap; the pre-spend estimate is printed</td>
+<td>superseded by 34</td>
+</tr>
+<tr>
+<td>9</td>
+<td>2026-09-15</td>
+<td>Frame defaults: 80 max frames, 45 s interval, same flags</td>
+<td>superseded by 33</td>
+</tr>
+<tr>
+<td>8</td>
+<td>2026-09-15</td>
+<td>The skill lives in this repo under <code>skills/&lt;name&gt;/</code> and is symlinked into <code>~/.claude/skills/</code>; vendoring into fleet is a separate owner-run issue</td>
+<td>superseded by 32</td>
+</tr>
+<tr>
+<td>7</td>
+<td>2026-09-15</td>
+<td>Frames from client recordings may go to the subscription vision lane; speech stays local; <code>--vision none</code> covers a client that forbids cloud processing</td>
+<td>superseded by 31</td>
+</tr>
+<tr>
+<td>6</td>
+<td>2026-09-15</td>
+<td>Bake-off uses the Gemini key (under $1) plus the codex and Claude subscription quotas; samples are two Theo videos and one chapter run</td>
+<td>superseded by 27</td>
+</tr>
+<tr>
+<td>5</td>
+<td>2026-09-15</td>
+<td>uv manages the runtime (<code>uv tool install</code>); already the practice in voice-lab</td>
+<td>superseded by 26</td>
+</tr>
+<tr>
+<td>4</td>
+<td>2026-09-15</td>
+<td>License MIT with the owner's GitHub name</td>
+<td>superseded by 25</td>
+</tr>
+<tr>
+<td>3</td>
+<td>2026-09-15</td>
+<td>Range and chapter runs nest under the video folder as <code>&lt;video-slug&gt;/&lt;range-slug&gt;/</code></td>
+<td>superseded by 24</td>
+</tr>
+<tr>
+<td>2</td>
+<td>2026-09-15</td>
+<td>Output root is the existing Desktop folder that holds the six channel folders; <code>&lt;NAME&gt;_OUT</code> overrides</td>
+<td>superseded by 23</td>
+</tr>
+<tr>
+<td>1</td>
+<td>2026-09-15</td>
+<td>Product identity option A: <code>watchlog</code>, <code>transcript.watchlog</code>, header <code>watchlog 1</code>; the CLI, package, env prefix, cache dir, and skill dir take the name</td>
+<td>superseded by 22</td>
+</tr>
+</tbody>
+</table>
+<h2 id="borrow">Borrowed from voice-lab</h2>
+<p>Read-only pass over <code>~/projects/voice-lab</code> (pipeline scripts, docs, decisions, one WhisperX output, the worker log in the workspace). voice-lab turns DVD rips and YouTube pulls into per-character voice clips: center channel, Demucs, WhisperX with diarization, embedding verification, casting reels. Most of it is out of scope here. The parts below are the same problems this tool has, already solved on this Mac, and each is a pattern to carry, never code to copy across repos.</p>
+<h2>Carry into the plan</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>voice-lab pattern</th>
+<th>where</th>
+<th>what it changes here</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Pin yt-dlp player clients to <code>android,mweb,web</code>; the default <code>android_vr</code> hands out URLs that 403 (verified 2026-08-17). Four attempts with a format ladder; on the last resort write a <code>LOWQUALITY.txt</code> marker so a degraded pull is never mistaken for a clean one. Video fetch is independent of audio fetch and its failure never affects the audio path.</td>
+<td><code>pipeline/voicelab-youtube.sh</code></td>
+<td>Item 6: the client chain becomes android, mweb, web with the progressive ladder behind it; a degraded fetch writes a warning into <code>meta.json</code>. Same independence rule the plan already has for captions.</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Atomic publish: write to a <code>.partial</code> name in the target dir and <code>mv</code> into place, because a parallel worker claims files within 60 s of appearing. Parallel workers claim work with <code>mkdir</code> claim dirs holding a pid; a claim whose pid is dead is stale and taken.</td>
+<td><code>voicelab-whisperx.sh</code>, <code>voicelab-ingest-podcast.sh</code></td>
+<td>Items 6 and 14: the source lock is a mkdir claim dir with a pid and stale detection; every cache artifact is written to a temp name and renamed.</td>
+</tr>
+<tr>
+<td>3</td>
+<td>WhisperX output shape: segments with <code>start</code>, <code>end</code>, <code>text</code>, <code>avg_logprob</code>, and per-word <code>start</code>, <code>end</code>, <code>score</code>. Measured throughput on this Mac, large-v3-turbo, CPU int8, four workers in parallel: 1.03 to 1.16x realtime per worker (4766 s of audio in 4113 s; 379 s in 331 s). MPS is available but the worker runs CPU.</td>
+<td><code>voicelab-whisperx.sh</code>, <code>data/transcripts/**/whisperx.json</code>, workspace <code>queue/whisperx.log</code></td>
+<td>Item 3: <code>Segment</code> carries optional <code>words</code> with per-word times and scores and a segment quality score, so the README trust table can point at low-confidence stretches. Item 24: local STT is about realtime on this Mac with WhisperX as configured, not the 10x the scout relayed for whisper.cpp; a 30-minute video is a 25-minute wait. The plan now names two candidate local backends, the existing <code>.venv-asr</code> WhisperX (installed, proven, gated pyannote not needed for our use) and <code>mlx-whisper</code>, and measures both before either is promised. M1 stays on hosted whisper-1.</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Clamp spans to words, not VAD boundaries: forced alignment stretches an edge word across a sound effect (a 7.78 s "walk."), so an edge word longer than 0.9 s is treated as alignment stretch and truncated.</td>
+<td><code>voicelab-clips.py</code> <code>tighten_to_words</code></td>
+<td>Items 8 and 9: segment boundaries are clamped to first and last word when word timings exist, and an edge word over 0.9 s is capped. Frames sampled at "segment start" then land on speech, not on the silence before it.</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Frames for identification are taken at the midpoint of the longest segments, not the first N, because clusters open with interjections cut over reaction shots; then restored to chronological order. Contact sheets via ffmpeg <code>tile</code> so a human judges nine frames at a glance and a vision call sends one image instead of nine.</td>
+<td><code>voicelab-label.py</code> <code>grab_frames</code>, <code>contact_sheet</code></td>
+<td>Item 10: writes a contact sheet of the planned frames into the run dir (used by the spike's hand-labeling and by anyone checking a run). Item 22 (M2): a talking-head sampling mode that prefers segment midpoints over starts is a one-flag addition.</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Vision calls use a JSON response schema instead of prompt-coaxed JSON; a confidence floor below which the answer is dropped; "unknown" rather than a guess; and the uniqueness rule enforced in code after the model, not only in the prompt. Measured: three independent runs of one cluster returned three different names all at 0.95, so self-reported confidence tracked fluency, not correctness.</td>
+<td><code>voicelab-label.py</code> <code>identify_joint</code></td>
+<td>Item 11: structured output, "illegible" as a first-class answer, and every rule the prompt states is also checked in code (frame ids present, no invented numbers). Item 21: the spike scores against hand labels only and ignores model confidence.</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Long inputs are chunked with <code>-f segment -c copy</code> at 15 minutes for Demucs and rejoined with concat, stream copy throughout.</td>
+<td><code>voicelab-youtube.sh</code></td>
+<td>Item 25 (<code>--deep</code>) and item 9's audio chunking use the same stream-copy segmenting; already the plan's shape, now with a known-good command.</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Podcast ingest keeps show notes and per-item <code>meta.json</code> next to the audio because the labeling step needs the cast list the notes carry.</td>
+<td><code>voicelab-ingest-podcast.sh</code></td>
+<td>Confirms R8: description, links, chapters travel with the output. No change.</td>
+</tr>
+<tr>
+<td>9</td>
+<td>A gitignored <code>.env</code> at the repo root plus a documented <code>.env.example</code>; one workspace root env var (<code>VOICE_LAB</code>) that the repo and a sibling repo share; audio never in git; a one-way <code>sync-from-workspace.sh</code> for metadata.</td>
+<td><code>.env.example</code>, <code>README.md</code></td>
+<td>Item 4: <code>&lt;NAME&gt;_OUT</code> and the cache dir follow the same shape; <code>.env.example</code> lists every variable with a one-line purpose. Outputs and cache stay out of git.</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Human overrides live in a JSON file with <code>_note</code> and <code>_verdicts</code> keys explaining each override in prose next to the machine value.</td>
+<td><code>data/clips/MMPR-1993-morphed/frame-verdicts.json</code></td>
+<td>Item 13: the <code>--glossary</code> file uses the same shape, so a caption correction carries its reason.</td>
+</tr>
+<tr>
+<td>11</td>
+<td><code>docs/decisions.md</code> with 43 rows in the fleet format, <code>assumed (reopens when: ...)</code> used heavily.</td>
+<td><code>docs/decisions.md</code></td>
+<td>Confirms the interview flow for this repo.</td>
+</tr>
+</tbody>
+</table>
+<h2>Looked at and left</h2>
+<ul>
+<li>Demucs vocal isolation, pyannote diarization, speaker embeddings, casting reels, ElevenLabs: not this tool's job. Diarization is Q13 and defaults to no.</li>
+<li>Gemini as the vision provider: voice-lab uses <code>gemini-3.7-flash</code> for identification with a note that flash-lite is the cheap tier. Doug asked for the GPT line here; Gemini 2.5 Flash-Lite stays the fallback and the spike measures both.</li>
+<li>The second Gemini key as a 429 fallback (<code>GEMINI_API_KEY_2</code>): a workaround for one provider's rate limit; the plan's retry with <code>Retry-After</code> covers it.</li>
+<li>Slack pings from workers: overnight batch posture; this tool's runs are minutes.</li>
+</ul>
+<h2>Facts established for the interview</h2>
+<ul>
+<li>API keys present on this Mac: Gemini only (as both <code>GEMINI_API_KEY</code> and <code>GOOGLE_API_KEY</code>). The OpenAI and Groq names appear only as empty template lines; there is no OpenRouter key. Subscription-backed CLIs installed: codex (OpenAI subscription, <code>codex exec -i &lt;image&gt;</code> attaches images), gemini CLI 0.43 (Google account quota when no API key is exported), claude (Anthropic subscription, <code>-p</code> with the Read tool reads images). The vision stage's default route is chosen among these by the spike; the hosted Qwen candidate drops.</li>
+<li>uv 0.11 is installed and voice-lab already uses <code>uv pip install --python</code> for its ASR venv on python.org 3.12, so uv as the runtime manager is established practice.</li>
+<li>yt-dlp on PATH is 2026.07.04, below the 2026.08.19 release that fixes the android_vr 403 regression; the tool pins its own copy in <code>uv.lock</code>.</li>
+<li>GitHub names <code>frameweave</code>, <code>watchlog</code>, <code>frameweave</code>, and <code>cuesheet</code> were all free under dougiefresh49 on 2026-09-15; <code>frameweave</code> was chosen on 2026-09-16.</li>
+<li>ffmpeg 8.0 is installed.</li>
+</ul>
+</ul><h2 id="audit">Audit in brief</h2>
+<p>Full text and evidence pointers: <code>docs/audit/2026-09-15-prior-tool-audit.md</code>. What the month with the prior tool taught, by theme:</p>
+<ul>
+<li><strong>Getting the video failed on every run.</strong> YouTube 403s on every web-client format until an android-client fallback was added; caption 429s aborted whole runs; partial files got resumed; a signed CDN URL returned a bot-challenge page that only a browser could get past.</li>
+<li><strong>The runtime bit three sessions.</strong> Homebrew Python is externally managed; pip silently no-op'd and runs crashed mid-pipeline. The fix lived only in agent memory, which was empty next session.</li>
+<li><strong>Output location was the most repeated correction.</strong> Hard-coded output dir, an extra nested folder on every run, outputs landing inside the repo, and a stated path ignored twice in one session.</li>
+<li><strong>Whole-video model calls were the cost and timeout driver.</strong> One 51-minute call hung over two hours; 290 tokens per video second at high resolution; chunking, retries, and cleanup all added live after failures; roughly $0.60 per 40-minute video.</li>
+<li><strong>Transcript quality.</strong> The video model elided speech (391 words where captions had 2,980); rolling captions tripled every line; auto-captions mangle technical terms; the model misread an on-screen number and nobody fixed the data.</li>
+<li><strong>Frames.</strong> 256 px was illegible; one frame per segment missed what the audio referenced; some videos never had a frame opened at all.</li>
+<li><strong>Metadata.</strong> The first follow-up after one run was about a link in the description the tool had not captured.</li>
+<li><strong>Agent process.</strong> Five successive "final" composites each with a visible defect; "renders clean" one turn after a console error; a repo setting changed without asking. The fleet corefiles already carry these rules and the new repo starts from them.</li>
+</ul></body></html>

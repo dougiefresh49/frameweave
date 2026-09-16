@@ -1,0 +1,52 @@
+# Decisions
+
+One line per decision, newest first, written the moment it resolves (fleet `decision-record` skill). Statuses: `accepted` | `assumed (reopens when: ...)` | `open` | `unformed` | `superseded by N`. Rows 1-19 seed the interview from `docs/questions.md` (same numbers); an answer supersedes its row. Round one (2026-09-16) resolved rows 1-6, 12, 17, 18 into rows 22-30; round two resolved rows 7-11, 13, 14, 19 into rows 31-41; round three resolved rows 15, 16, 41 into rows 42-46. No open questions remain.
+
+| # | date | decision | status |
+|---|------|----------|--------|
+| 46 | 2026-09-16 | Local working directory renamed `~/projects/frameweave`; docs carry no reference to the earlier tool's repo, author, or format, and the scrub term list stays outside the repo | accepted |
+| 45 | 2026-09-16 | Speaker-label fixture and first real `--speakers` run come from Doug's kickoff recording folder on the Desktop (path set as `FRAMEWEAVE_KICKOFF_DIR` in `.env`, never written in the repo: chunks 1, 2, 4 with audio, 12.5, 3.7, and 16.2 minutes; chunk 0 silent; a 33-minute stitched file). The 60 s two-speaker fixture is cut from the wrap-up chunk by item 27; the silent chunk is item 9's real "no speech" case; the stitched file is the M1 acceptance's local-file run. Nothing from that folder enters git | accepted |
+| 44 | 2026-09-16 | The old fork on disk is archived after M1 lands | accepted |
+| 43 | 2026-09-16 | Whole-video pass (`--deep`: the entire video sent to a long-context model, the earlier tool's method) stays parked in M3; not needed for M1 | accepted |
+| 42 | 2026-09-16 | Frame budget scales with duration: `max(80, 2 * duration_minutes)`; `--max-frames` overrides | accepted |
+| 41 | 2026-09-16 | Frame budget scales with duration: default `max(80, 2 * duration_minutes)` frames per run, the same density as Doug's past runs (about two per minute); an explicit `--max-frames` overrides; frames are never chunked, the budget covers the whole video or range | superseded by 42 |
+| 40 | 2026-09-16 | Chooser policy: both subscriptions weighted equally, most 7-day headroom after the run wins; the skip line is `FRAMEWEAVE_LANE_SKIP_PERCENT` (default 90); an explicit lane (`--vision claude`, or "use Claude" to the skill) makes no choice at all and only prints the projection | accepted |
+| 39 | 2026-09-16 | Output root moves: the Desktop folder is renamed `frameweave` and the channel folders move with it; the path lives only in `.env` as `FRAMEWEAVE_OUT` (with `.env.example` as the template) and is hard-coded nowhere; a missing value is a `doctor` failure with the line to add | accepted |
+| 38 | 2026-09-16 | Local STT at about realtime is acceptable for M1; the spike measures MPS and mlx-whisper | accepted |
+| 37 | 2026-09-16 | The generated README follows the plan's section 3 shape | accepted |
+| 36 | 2026-09-16 | English only. Speaker labels are a flag (`--speakers`), off by default because tech videos are single-speaker, on for client meetings (kickoff with a client describing features, Doug asking questions); WhisperX diarization via pyannote with the Hugging Face token that voice-lab already holds; lands in M1 as its own item | accepted |
+| 35 | 2026-09-16 | Cache is pruned only by `cache prune`, and the tool warns before a run and in `doctor` when free disk falls under `FRAMEWEAVE_DISK_WARN_GB` (default 10), printing the cache size and the prune command | accepted |
+| 34 | 2026-09-16 | No spend cap. `inspect <input>` is the "show me the estimate before proceeding" step: tokens per lane, quota projection, and dollars if the run would fall to the metered API; the skill runs it when asked for an estimate. `run` prints the same and proceeds | accepted |
+| 33 | 2026-09-16 | Frame defaults: 80 frames, 45 s interval, same flag names; see 41 for the duration rule | accepted |
+| 32 | 2026-09-16 | Skill install: `skills/frameweave/` in this repo symlinked into `~/.claude/skills/`; a fleet issue asks for a doc or reference that names this skill as an external skill (filed 2026-09-16) | accepted |
+| 31 | 2026-09-16 | Speech stays local. Frames go to the chosen subscription lane by default; `--vision none` turns the vision stage off for a recording that must not leave the machine | accepted |
+| 30 | 2026-09-16 | Vision lane is chosen per run from a measured estimate, not a fixed default. The bake-off produces, per lane and model, tokens and quota-percent per frame and per transcript-minute; at run time the tool reads the `ai-usage` snapshot, projects each lane's window after the run, and picks the lane with the most headroom left, printing the projection. Models: codex lane never GPT-6 Astra by default (Doug: "gpt-6 is now highly coveted"), the cheapest codex model that passes the recall floor (candidates gpt-5.6-luna, gpt-5.5, gpt-5.6-sol, gpt-5.6-terra at low effort); Claude lane sonnet only, never Fable (its own 7-day cap). Both CLIs report tokens per call (codex prints `tokens used`; `claude -p --output-format json` carries usage), so every run's `cost.json` recalibrates the estimate. `--vision <lane>` overrides | accepted |
+| 29 | 2026-09-16 | Gemini CLI is not a vision lane; Doug's Gemini use elsewhere is SDK and API only. Gemini stays as the metered API fallback (2.5 Flash-Lite) | accepted |
+| 28 | 2026-09-16 | GitHub remote `dougiefresh49/frameweave`, public from the start, on the condition that nothing in the repo references the earlier tool; a scrub check against a term list kept outside the repo gates every push | accepted |
+| 27 | 2026-09-16 | Bake-off samples: Theo `turn-off-claude-codes-memory` (39 min, UI-dense, 78 frames, four chunks in the old run) and Theo `i-need-you-to-hear-me-out-its-really-good` (31 min, talking-head weighted, 19 frames), plus the two-chapter run `gpt-6-astra-is-a-freak` (chapters 04:30-09:40 and 21:16-23:18). Metered spend under $1 on the Gemini key; codex and Claude quotas for the subscription lanes | accepted |
+| 26 | 2026-09-16 | uv manages the runtime; `uv tool install` ships the CLI | accepted |
+| 25 | 2026-09-16 | License MIT, copyright dougiefresh49 | accepted |
+| 24 | 2026-09-16 | Chapter and range runs nest under the video folder: `<video-slug>/<range-slug>/` | accepted |
+| 23 | 2026-09-16 | Output root stays the existing Desktop folder that holds the channel folders; `FRAMEWEAVE_OUT` overrides. The folder's own name carries the earlier tool's abbreviation, raised as Q20 | accepted |
+| 22 | 2026-09-16 | Product identity option B: `frameweave`; file `transcript.fwv`; header `frameweave 1`; CLI, package, env prefix `FRAMEWEAVE_`, cache dir, and skill dir take the name | accepted |
+| 21 | 2026-09-15 | Vision stage prefers a subscription-backed CLI lane (codex, Claude Code on sonnet, Gemini CLI) over a metered API; the spike ranks lanes by hand-labeled recall then quota use; metered Gemini 2.5 Flash-Lite is the fallback. Owner: "something that is included with subscription pricing vs having to pay Gemini each frame" | accepted |
+| 20 | 2026-09-15 | Captionless speech in M1 is local WhisperX large-v3-turbo (about realtime on this Mac, voice-lab measurement); hosted whisper-1 and Groq are optional M2 items because no OpenAI or Groq key exists here | assumed (reopens when: an OpenAI or Groq key is added, or the spike shows local STT under 0.5x realtime on MPS is not reachable and a run needs it faster) |
+| 19 | 2026-09-15 | Local STT at about 30 minutes wall clock for a 30-minute captionless video is acceptable for M1 | superseded by 38 |
+| 18 | 2026-09-15 | Default vision lane when both pass the bar: codex, because sonnet quota is shared with delegated agent work | superseded by 30 |
+| 17 | 2026-09-15 | Gemini CLI vision lane skipped; headless use fails with an ineligible-account error today | superseded by 29 |
+| 16 | 2026-09-15 | The old fork on disk is archived after M1 lands; nothing in this plan reads it | superseded by 44 |
+| 15 | 2026-09-15 | Whole-video understanding (`--deep`) stays parked in M3 | superseded by 43 |
+| 14 | 2026-09-15 | The generated README follows the plan's section 3 shape, not the exact order of the existing Desktop READMEs | superseded by 37 |
+| 13 | 2026-09-15 | English only, no diarization in M1; WhisperX diarization is a later flag | superseded by 36 |
+| 12 | 2026-09-15 | GitHub remote `dougiefresh49/<name>` created private until M1 acceptance; the name is free for all three options | superseded by 28 |
+| 11 | 2026-09-15 | Source media cache is pruned only by `cache prune`, never automatically | superseded by 35 |
+| 10 | 2026-09-15 | No per-run spend cap; the pre-spend estimate is printed | superseded by 34 |
+| 9 | 2026-09-15 | Frame defaults: 80 max frames, 45 s interval, same flags | superseded by 33 |
+| 8 | 2026-09-15 | The skill lives in this repo under `skills/<name>/` and is symlinked into `~/.claude/skills/`; vendoring into fleet is a separate owner-run issue | superseded by 32 |
+| 7 | 2026-09-15 | Frames from client recordings may go to the subscription vision lane; speech stays local; `--vision none` covers a client that forbids cloud processing | superseded by 31 |
+| 6 | 2026-09-15 | Bake-off uses the Gemini key (under $1) plus the codex and Claude subscription quotas; samples are two Theo videos and one chapter run | superseded by 27 |
+| 5 | 2026-09-15 | uv manages the runtime (`uv tool install`); already the practice in voice-lab | superseded by 26 |
+| 4 | 2026-09-15 | License MIT with the owner's GitHub name | superseded by 25 |
+| 3 | 2026-09-15 | Range and chapter runs nest under the video folder as `<video-slug>/<range-slug>/` | superseded by 24 |
+| 2 | 2026-09-15 | Output root is the existing Desktop folder that holds the six channel folders; `<NAME>_OUT` overrides | superseded by 23 |
+| 1 | 2026-09-15 | Product identity option A: `watchlog`, `transcript.watchlog`, header `watchlog 1`; the CLI, package, env prefix, cache dir, and skill dir take the name | superseded by 22 |
