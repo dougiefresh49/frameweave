@@ -54,6 +54,7 @@ from frameweave.sources.http import HttpSource
 from frameweave.sources.local import LocalFileSource
 from frameweave.sources.youtube import YouTubeSource, claim
 from frameweave.stt import audio as stt_audio
+from frameweave.stt.audio import Chunk
 from frameweave.stt.base import SttBackend, SttResult, clamp_to_words, merge_chunks
 from frameweave.stt.local import WhisperXBackend, is_silent
 from frameweave.types import (
@@ -647,10 +648,18 @@ def _stage_transcript(ctx: RunContext) -> StageResult:
             usage = usage + result.usage
         if not results:
             result = backend.transcribe(audio, ctx.config)
-            segments = clamp_to_words(result.segments)
-            source_tag = result.source
             usage = usage + result.usage
             silent = is_silent(result)
+            source_tag = result.source
+            if hasattr(backend, "merge_and_diarize"):
+                piece = Chunk(audio, offset_s=0.0, duration_s=result.audio_seconds)
+                segments = backend.merge_and_diarize(audio, [(piece, result)])
+            else:
+                segments = clamp_to_words(result.segments)
+        elif hasattr(backend, "merge_and_diarize"):
+            segments = backend.merge_and_diarize(audio, results)
+            source_tag = results[0][1].source
+            silent = not segments
         else:
             segments = clamp_to_words(merge_chunks(results))
             source_tag = results[0][1].source if results else "stt"

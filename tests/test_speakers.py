@@ -260,8 +260,10 @@ def test_merge_and_diarize_calls_diarizer_once_with_full_audio(tmp_path: Path) -
     assert len(calls) == 1
     assert calls[0][0] == full_audio
     assert calls[0][1] == ["from first", "from second"]
-    assert [segment.speaker for segment in labeled] == ["S1", "S1"]
-    assert [segment.text for segment in labeled] == ["from first", "from second"]
+    # Presentation merge (#54) collapses the short span into one segment after diarize.
+    assert [segment.speaker for segment in labeled] == ["S1"]
+    assert [segment.text for segment in labeled] == ["from first from second"]
+    assert [segment.id for segment in labeled] == ["s0001"]
 
 
 def test_diarize_passes_community_1_model_name(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
+import re
 import shutil
 import subprocess
 import time
-from collections.abc import Callable
+import warnings
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from frameweave.types import Segment, Usage, Word
 
 from .audio import Chunk, duration
-from .base import SttResult, SttTimeout, clamp_to_words, merge_chunks
+from .base import SttResult, SttTimeout, clamp_to_words, merge_chunks, merge_into_presentation
 
 if TYPE_CHECKING:
     from frameweave.config import Check, Config, FlagSpec
@@ -22,6 +26,15 @@ if TYPE_CHECKING:
 _BATCH_SIZE = 8
 _CPU_THREADS = 3
 _SOURCE = "stt-whisperx"
+_WARN_MODULES = (
+    "whisperx",
+    "torch",
+    "torchaudio",
+    "torchcodec",
+    "lightning",
+    "pytorch_lightning",
+)
+_QUIET_LOGGERS = _WARN_MODULES + ("pyannote", "speechbrain")
 
 
 class WhisperXBackend:
@@ -61,55 +74,60 @@ class WhisperXBackend:
         audio: Path,
         chunk_results: list[tuple[Chunk, SttResult]],
     ) -> list[Segment]:
-        """Merge chunk transcripts, then diarize once against the full audio file."""
-        segments = merge_chunks(chunk_results)
-        if self.diarize is None:
-            return segments
-        return self.diarize(audio, segments)
+        """Chunk-merge, clamp, diarize (optional), then form presentation spans."""
+        segments = clamp_to_words(merge_chunks(chunk_results))
+        if self.diarize is not None:
+            with _quiet_third_party():
+                segments = self.diarize(audio, segments)
+        return merge_into_presentation(segments)
 
     def _transcribe(self, audio: Path, config: Config, started: float) -> SttResult:
         audio_seconds = duration(audio, timeout_s=config.timeout_s)
-        import whisperx
+        with _quiet_third_party():
+            import whisperx
 
-        device = config.stt_device
-        compute_type = "int8" if device == "cpu" else "default"
-        model_key = (config.stt_model, device, compute_type)
-        if self._model is None or self._model_key != model_key:
-            # Use whisperx's default VAD (assumed: spike 3.4x realtime used the default).
-            self._model = whisperx.load_model(
-                config.stt_model,
-                device,
-                compute_type=compute_type,
-                language="en",
-                threads=_CPU_THREADS,
-            )
-            self._model_key = model_key
-
-        samples = whisperx.load_audio(str(audio))
-        transcription = self._model.transcribe(samples, batch_size=_BATCH_SIZE)
-        raw_segments = transcription.get("segments", [])
-        dropped_words = 0
-        if raw_segments:
-            language = transcription.get("language", "en")
-            align_key = (language, device)
-            if self._align_model is None or self._align_key != align_key:
-                self._align_model, self._align_metadata = whisperx.load_align_model(
-                    language_code=language,
-                    device=device,
+            device = config.stt_device
+            compute_type = "int8" if device == "cpu" else "default"
+            model_key = (config.stt_model, device, compute_type)
+            if self._model is None or self._model_key != model_key:
+                # Use whisperx's default VAD (assumed: spike 3.4x realtime used the default).
+                self._model = whisperx.load_model(
+                    config.stt_model,
+                    device,
+                    compute_type=compute_type,
+                    language="en",
+                    threads=_CPU_THREADS,
                 )
-                self._align_key = align_key
-            aligned = whisperx.align(
-                raw_segments,
-                self._align_model,
-                self._align_metadata,
-                samples,
-                device,
-                return_char_alignments=False,
-            )
-            segments, dropped_words = _segments(aligned.get("segments", []))
-            segments = clamp_to_words(segments)
-        else:
-            segments = []
+                self._model_key = model_key
+
+            samples = whisperx.load_audio(str(audio))
+            transcription = self._model.transcribe(samples, batch_size=_BATCH_SIZE)
+            raw_segments = transcription.get("segments", [])
+            dropped_words = 0
+            if raw_segments:
+                language = transcription.get("language", "en")
+                align_key = (language, device)
+                if self._align_model is None or self._align_key != align_key:
+                    self._align_model, self._align_metadata = whisperx.load_align_model(
+                        language_code=language,
+                        device=device,
+                    )
+                    self._align_key = align_key
+                aligned = whisperx.align(
+                    raw_segments,
+                    self._align_model,
+                    self._align_metadata,
+                    samples,
+                    device,
+                    return_char_alignments=False,
+                )
+                segments, dropped_words = _segments(aligned.get("segments", []))
+                # Keep raw (clamped) segments here. Presentation merge runs only after
+                # merge_chunks in merge_and_diarize so overlap dedup never drops a
+                # whole 20–40 s span at a chunk boundary.
+                segments = clamp_to_words(segments)
+            else:
+                segments = []
 
         elapsed = time.monotonic() - started
         return SttResult(
@@ -124,6 +142,64 @@ class WhisperXBackend:
 def is_silent(result: SttResult) -> bool:
     """Return whether a transcription contains no spoken segments."""
     return not result.segments
+
+
+@contextmanager
+def _quiet_third_party() -> Iterator[None]:
+    """Silence third-party warnings/logs during model load and transcription."""
+    previous_filters = warnings.filters[:]
+    previous_disable = logging.root.manager.disable
+    previous: dict[str, tuple[int, list[tuple[logging.Handler, int]], bool]] = {}
+    for name in _QUIET_LOGGERS:
+        logger = logging.getLogger(name)
+        previous[name] = (
+            logger.level,
+            [(handler, handler.level) for handler in logger.handlers],
+            logger.propagate,
+        )
+
+    try:
+        for name in _WARN_MODULES:
+            warnings.filterwarnings(
+                "ignore",
+                module=rf"{re.escape(name)}(\..*)?",
+            )
+        # pyannote emits the torchcodec UserWarning from its own module path.
+        warnings.filterwarnings("ignore", module=r"pyannote(\..*)?")
+
+        # Libraries reconfigure their loggers during import/load (WhisperX
+        # setup_logging, Lightning migration). Pin levels and also disable
+        # INFO/WARNING globally for the quiet window so mid-load resets lose.
+        logging.disable(logging.WARNING)
+        for name in _QUIET_LOGGERS:
+            logger = logging.getLogger(name)
+            logger.setLevel(logging.ERROR)
+            for handler in logger.handlers:
+                handler.setLevel(logging.ERROR)
+
+        # WhisperX's get_logger() calls setup_logging() when there are no handlers,
+        # which resets the level to INFO and attaches a StreamHandler. Seed a
+        # NullHandler first so that path never runs during our quiet window.
+        whisperx_logger = logging.getLogger("whisperx")
+        if not whisperx_logger.handlers:
+            whisperx_logger.addHandler(logging.NullHandler())
+        whisperx_logger.setLevel(logging.ERROR)
+        whisperx_logger.propagate = False
+        for handler in whisperx_logger.handlers:
+            handler.setLevel(logging.ERROR)
+
+        yield
+    finally:
+        logging.disable(previous_disable)
+        warnings.filters[:] = previous_filters
+        for name, (level, handlers, propagate) in previous.items():
+            logger = logging.getLogger(name)
+            logger.setLevel(level)
+            logger.handlers.clear()
+            for handler, handler_level in handlers:
+                handler.setLevel(handler_level)
+                logger.addHandler(handler)
+            logger.propagate = propagate
 
 
 def cli_flags() -> list[FlagSpec]:
