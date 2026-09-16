@@ -28,11 +28,24 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "frames-small-change"
 MISSING_TOML = Path("/nonexistent/frameweave-test/config.toml")
 
 
+def _truetype_candidates() -> list[Path]:
+    return [
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        Path("/usr/share/fonts/TTF/DejaVuSans.ttf"),
+        Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+        Path("/Library/Fonts/Arial.ttf"),
+        Path("/System/Library/Fonts/Helvetica.ttc"),
+        Path("/Library/Fonts/Helvetica.ttc"),
+    ]
+
+
 def _font(size: int):
-    path = Path("/System/Library/Fonts/Supplemental/Arial.ttf")
-    if path.is_file():
-        return ImageFont.truetype(str(path), size)
-    return ImageFont.load_default()
+    for path in _truetype_candidates():
+        if path.is_file():
+            return ImageFont.truetype(str(path), size)
+    # pillow 10.1+ accepts size=; keep the caller's size so the digit pair stays
+    # above the drop threshold (size=28 leaves that pair at Hamming 1).
+    return ImageFont.load_default(size=size)
 
 
 def _make_ui(
@@ -103,10 +116,6 @@ def test_small_change_pairs_kept_at_default_threshold() -> None:
         b_path = _make_ui(frames_dir / f"{name}-b.png", **b_kw)
         distance = hamming(dhash(a_path), dhash(b_path))
         results[name] = distance
-        assert distance > DEFAULT_THRESHOLD, (
-            f"{name} pair distance {distance} <= threshold {DEFAULT_THRESHOLD} "
-            f"(size={DEFAULT_SIZE}); second frame would be dropped"
-        )
         frames = [
             _frame("f0001", 0.0, "primary", a_path.name),
             _frame("f0002", 1.0, "extra", b_path.name),
@@ -114,10 +123,11 @@ def test_small_change_pairs_kept_at_default_threshold() -> None:
         result = suppress(frames, frames_dir)
         assert [f.id for f in result.kept] == ["f0001", "f0002"], name
         assert result.dropped == []
-    # Surface measured distances for the round report.
-    assert results["filename"] > DEFAULT_THRESHOLD
-    assert results["digit"] > DEFAULT_THRESHOLD
-    assert results["tab"] > DEFAULT_THRESHOLD
+    # Surface measured distances for the round report / CI failure message.
+    assert all(d > DEFAULT_THRESHOLD for d in results.values()), (
+        f"pair distances {results} must each exceed threshold {DEFAULT_THRESHOLD} "
+        f"(size={DEFAULT_SIZE}); second frame would be dropped"
+    )
 
 
 def test_identical_extra_is_dropped() -> None:

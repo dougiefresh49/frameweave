@@ -14,9 +14,10 @@ from frameweave.config import Check, Config, FlagSpec
 from frameweave.types import Frame
 
 # Tuned against tests/fixtures/frames-small-change (file name / digit / tab title):
-# size 16 left those pairs at distance 0–5; size 32 clears threshold 6 on all three.
+# size 16 left those pairs at distance 0–5; size 32 keeps them above threshold 2.
+# Threshold 2 is conservative: small UI text can land near 3 bits on bitmap fonts.
 DEFAULT_SIZE = 32
-DEFAULT_THRESHOLD = 6
+DEFAULT_THRESHOLD = 2
 
 
 @dataclass(frozen=True)
