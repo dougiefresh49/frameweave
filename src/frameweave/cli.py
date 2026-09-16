@@ -48,7 +48,9 @@ _OUTPUT_TOKENS_PER_FRAME = 120
 _GB = 1024**3
 _SUBSCRIPTION_LANES = frozenset({"claude", "codex"})
 # Dest names that are CLI/pipeline control, not Config fields.
-_CLI_ONLY_DESTS = frozenset({"debug", "dry_run", "doctor_json", "redo", "frames_only", "out"})
+_CLI_ONLY_DESTS = frozenset(
+    {"debug", "dry_run", "doctor_json", "redo", "frames_only", "out", "start", "end", "chapter"}
+)
 
 
 def cli_flags() -> list[FlagSpec]:
@@ -188,12 +190,12 @@ def _collect_flags() -> list[FlagSpec]:
 
 
 def _flag_modules() -> list[str]:
-    # config first for dedup; pipeline + this module are not in MODULES but own flags.
+    # config first for dedup; pipeline + range + this module are not in MODULES but own flags.
     ordered = ["frameweave.config"]
     for name in MODULES:
         if name not in ordered:
             ordered.append(name)
-    for name in ("frameweave.pipeline", "frameweave.cli"):
+    for name in ("frameweave.range", "frameweave.pipeline", "frameweave.cli"):
         if name not in ordered:
             ordered.append(name)
     return ordered
@@ -305,6 +307,8 @@ def _cmd_run(
             _print_frames_line(config, resolved.video_id, out)
 
     try:
+        from frameweave.range import url_t_from
+
         outcome = pipeline.run(
             args.input,
             config,
@@ -316,6 +320,10 @@ def _cmd_run(
             vision=backends.get("vision") if backends else None,
             out_override=out_override,
             resolved=resolved,
+            start=getattr(args, "start", None),
+            end=getattr(args, "end", None),
+            chapter=getattr(args, "chapter", None),
+            url_t=url_t_from(args.input),
         )
     except Exception as exc:
         return _handle_error(exc, bool(getattr(args, "debug", False)), err)
@@ -477,6 +485,10 @@ def _handle_error(exc: BaseException, debug: bool, err: TextIO) -> int:
 def _stage_for_error(exc: BaseException) -> str:
     if isinstance(exc, ConfigError):
         return "config"
+    from frameweave.range import RangeError
+
+    if isinstance(exc, RangeError):
+        return "range"
     if isinstance(exc, (SourceBusy, NotMediaError)):
         return "fetch_media"
     if isinstance(exc, SttError):

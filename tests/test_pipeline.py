@@ -20,7 +20,7 @@ from frameweave.pipeline import (
     preflight_checks,
     run,
 )
-from frameweave.types import Resolved, Segment
+from frameweave.types import Chapter, Resolved, Segment
 from tests.fakes.pipeline import FakeSource, FakeStt, FakeVision
 from tests.make_synthetic import make as make_synthetic
 
@@ -472,6 +472,7 @@ def test_sigint_subprocess_reconciles_and_clears_temps(tmp_path: Path) -> None:
         from frameweave.config import load
         from frameweave.ledger import DELETERS, Ledger
         from frameweave.pipeline import RunContext, _install_handlers
+        from frameweave.range import RangeSpec
         from frameweave.types import Resolved
 
         run_dir = Path({str(run_dir)!r})
@@ -510,7 +511,7 @@ def test_sigint_subprocess_reconciles_and_clears_temps(tmp_path: Path) -> None:
             source_dir=source_dir,
             run_dir=run_dir,
             run_key="rk",
-            range_spec="full",
+            range_spec=RangeSpec(0.0, 1.0, "full", "", "full"),
             ledger=led,
             progress=lambda _m: None,
             redo=set(),
@@ -555,3 +556,69 @@ def test_stage_registry_order() -> None:
         "describe",
         "assemble",
     ]
+
+
+def test_two_chapter_runs_reuse_fetch_distinct_keys(tmp_path: Path) -> None:
+    """Second chapter: zero fetch calls, distinct run key and output folder."""
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path, vision_lane="none")
+    source = FakeSource(video=video)
+    stt = FakeStt(
+        segments=[
+            Segment(0.0, 5.0, "intro line", "stt-fake", id="s0001"),
+            Segment(8.0, 12.0, "middle line", "stt-fake", id="s0002"),
+            Segment(15.0, 18.0, "outro line", "stt-fake", id="s0003"),
+        ]
+    )
+    vision = FakeVision()
+    resolved = Resolved(
+        video_id="chapters-vid",
+        title="Synthetic twenty",
+        channel="Test Channel",
+        source=str(video.resolve()),
+        duration=20.0,
+        chapters=[
+            Chapter(0.0, "Intro"),
+            Chapter(8.0, "Middle"),
+            Chapter(15.0, "Outro"),
+        ],
+        has_captions=False,
+    )
+
+    first = run(
+        str(video),
+        cfg,
+        source=source,
+        stt=stt,
+        vision=vision,
+        resolved=resolved,
+        chapter="Intro",
+    )
+    fetch_after_first = source.fetch_calls
+    assert fetch_after_first >= 1
+
+    second = run(
+        str(video),
+        cfg,
+        source=source,
+        stt=stt,
+        vision=vision,
+        resolved=resolved,
+        chapter="Middle",
+    )
+    assert source.fetch_calls == fetch_after_first
+    assert first.run_key != second.run_key
+    assert first.output_path != second.output_path
+    assert first.output_path.name == "intro"
+    assert second.output_path.name == "middle"
+
+    first_text = (first.output_path / "transcript.fwv").read_text(encoding="utf-8")
+    second_text = (second.output_path / "transcript.fwv").read_text(encoding="utf-8")
+    assert "range: chapter: Intro" in first_text
+    assert "range: chapter: Middle" in second_text
+    assert "chapters: 00:00:00 Intro; 00:00:08 Middle; 00:00:15 Outro" in first_text
+    assert "chapters: 00:00:00 Intro; 00:00:08 Middle; 00:00:15 Outro" in second_text
+    assert "## [00:00:00] Intro" in first_text
+    assert "## [00:00:08] Middle" not in first_text
+    assert "## [00:00:08] Middle" in second_text
+    assert "## [00:00:00] Intro" not in second_text
