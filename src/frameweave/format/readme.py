@@ -21,6 +21,8 @@ import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from frameweave.util import timecode
+
 if TYPE_CHECKING:
     from frameweave.config import Check, Config, FlagSpec
 
@@ -111,10 +113,19 @@ def _title_section(meta: dict[str, Any]) -> str:
     return f"{heading}\n\n{summary}"
 
 
+def _format_duration(value: Any) -> Any:
+    """Numeric duration (seconds) as ``HH:MM:SS``; strings and other values pass through."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return timecode.format(float(value), tenths=False)
+    return value
+
+
 def _source_section(meta: dict[str, Any]) -> str:
     lines = [
         f"- Source: {_field(meta, 'source')}",
-        f"- Duration: {_field(meta, 'duration')}",
+        f"- Duration: {_format_duration(_field(meta, 'duration'))}",
         f"- Published: {_field(meta, 'published')}",
         f"- Range: {_field(meta, 'range')}",
         f"- Analyzed: {_field(meta, 'generated_at')}",
@@ -299,6 +310,8 @@ def _provenance_section(meta: dict[str, Any], cost: dict[str, Any]) -> str:
     total_usd = _field(cost, "total_usd")
     if total_usd == _UNKNOWN:
         cost_line = f"- Total cost: {_UNKNOWN}"
+    elif isinstance(total_usd, int | float) and not isinstance(total_usd, bool):
+        cost_line = f"- Total cost: ${float(total_usd):.2f}"
     else:
         cost_line = f"- Total cost: ${total_usd}"
     unknown_usd = _field(cost, "unknown_usd", default=0)
