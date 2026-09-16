@@ -1,0 +1,38 @@
+frameweave 1
+title: Connecting a worker to a queue
+channel: Example Channel
+source: https://www.youtube.com/watch?v=XXXXXXXXXXX
+duration: 00:30:00
+range: full
+transcript-source: captions-auto
+vision: claude:sonnet standard, 8 per call
+frames: 6 primary 5 extra 1 at 1280px
+completion: complete
+generated: 2026-09-16T18:04:11Z frameweave 0.1.0
+chapters: 00:00:00 Intro; 00:04:30 The queue; 00:12:52 Results
+
+## [00:00:00] Intro
+
+[00:00:00-00:00:09] said/captions-auto: today we connect a worker to a queue and watch it drain
+[00:00:00] seen/claude:sonnet #f0001 frames/f0001-00-00-00.0.jpg: A title card over a dark background.
+  text: "Connecting a worker to a queue"
+[00:00:09-00:00:21] said/captions-auto: first the config file so the worker knows which queue to read
+[00:00:09] seen/claude:sonnet #f0002 frames/f0002-00-00-09.0.jpg: An editor with a short config file.
+  text: "QUEUE_NAME=jobs", "BATCH=10"
+
+## [00:04:30] The queue
+
+[00:04:30-00:04:47] said/captions-auto: so I connect the worker to the jobs queue and watch it drain
+[00:04:30] seen/claude:sonnet #f0012 frames/f0012-00-04-30.0.jpg: Terminal on the left, a config file open on the right.
+  text: "QUEUE_NAME=jobs", "worker.py", "45 pending"
+[00:05:15] seen+/claude:sonnet #f0013 frames/f0013-00-05-15.0.jpg: Same terminal, the queue counter now lower.
+  text: "12 pending"
+
+## [00:12:52] Results
+
+[00:12:52-00:13:10] said/captions-auto: and that is the whole run, forty five jobs in under a minute
+[00:12:52] seen/claude:sonnet #f0031 frames/f0031-00-12-52.0.jpg: A summary slide with three numbers.
+  text: "45 jobs", "58 s", "0 failed"
+[00:13:10-00:13:20] said/captions-auto: thanks for watching
+[00:13:10] seen/claude:sonnet #f0032 frames/f0032-00-13-10.0.jpg: The presenter on camera, no slide.
+  text:
