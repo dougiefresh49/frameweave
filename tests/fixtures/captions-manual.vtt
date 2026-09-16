@@ -1,0 +1,121 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:03.000
+<c>Welcome to this practical frame weaving demonstration</c>
+
+00:00:03.000 --> 00:00:06.000
+Today we inspect a small repeatable video workflow
+
+00:00:06.000 --> 00:00:09.000
+First the source metadata identifies the recording safely
+
+00:00:09.000 --> 00:00:12.000
+Then captions provide a fast local transcript path
+
+00:00:12.000 --> 00:00:15.000
+Manual tracks preserve the speaker's intended wording
+
+00:00:15.000 --> 00:00:18.000
+Automatic tracks often repeat their recent caption lines
+
+00:00:18.000 --> 00:00:21.000
+The parser removes that overlap without losing speech
+
+00:00:21.000 --> 00:00:24.000
+Clean timestamps keep every observation in proper order.
+
+00:00:24.000 --> 00:00:27.000
+Short cues accumulate and I think so
+
+00:00:27.000 --> 00:00:30.000
+so This opening section ends with a clear sentence
+
+00:00:30.000 --> 00:00:33.000
+Next we compare the visible frames with spoken context
+
+00:00:33.000 --> 00:00:36.000
+Each sampled image receives a stable identifier
+
+00:00:36.000 --> 00:00:39.000
+Primary frames begin where a speech segment begins
+
+00:00:39.000 --> 00:00:42.000
+Extra frames cover meaningful changes inside longer passages
+
+00:00:42.000 --> 00:00:45.000
+The frame file name also carries its timestamp
+
+00:00:45.000 --> 00:00:48.000
+Agents can inspect the image when exact text matters
+
+00:00:48.000 --> 00:00:51.000
+Descriptions summarize the screen without replacing ground truth
+
+00:00:51.000 --> 00:00:54.000
+Quoted strings record only what the model can read
+
+00:00:54.000 --> 00:00:57.000
+Uncertain lettering stays explicitly marked as illegible
+
+00:00:57.000 --> 00:01:00.000
+This second section closes at another sentence.
+
+00:01:00.000 --> 00:01:03.000
+Now the transcript joins evidence from both channels
+
+00:01:03.000 --> 00:01:06.000
+Speech remains verbatim from the selected caption track
+
+00:01:06.000 --> 00:01:09.000
+Visual summaries remain clearly labeled as model descriptions
+
+00:01:09.000 --> 00:01:12.000
+Relative paths make the complete folder easy to move
+
+00:01:12.000 --> 00:01:15.000
+Small JSON sidecars keep structured provenance available
+
+00:01:15.000 --> 00:01:18.000
+Plain text keeps the main artifact easy to read
+
+00:01:18.000 --> 00:01:21.000
+Stable segment identifiers support later frame associations
+
+00:01:21.000 --> 00:01:24.000
+Sentence boundaries produce coherent chunks for downstream agents
+
+00:01:24.000 --> 00:01:27.000
+The fallback boundary stays close to thirty seconds
+
+00:01:27.000 --> 00:01:30.000
+This third section completes the provenance explanation.
+
+00:01:30.000 --> 00:01:33.000
+Finally the run reports every resource it consumed
+
+00:01:33.000 --> 00:01:36.000
+Caption fetching uses no vision quota or dollars
+
+00:01:36.000 --> 00:01:39.000
+Rate limits become warnings instead of fatal errors
+
+00:01:39.000 --> 00:01:42.000
+Missing tracks fall through to local speech recognition
+
+00:01:42.000 --> 00:01:45.000
+Client audio never leaves the machine for transcription
+
+00:01:45.000 --> 00:01:48.000
+Temporary files become visible only after atomic publication
+
+00:01:48.000 --> 00:01:51.000
+Tests replay fixed fixtures without touching the network
+
+00:01:51.000 --> 00:01:54.000
+Sequential ids make ordering obvious to every reader
+
+00:01:54.000 --> 00:01:57.000
+The final artifact preserves its raw English&nbsp;caption track
+
+00:01:57.000 --> 00:02:00.000
+The demonstration finishes with one last complete sentence!
