@@ -301,6 +301,41 @@ def test_choose_explicit_gemini_without_key_raises_naming_lane() -> None:
     assert "gemini" in str(excinfo.value)
 
 
+def test_choose_skip_cli_presence_bypasses_explicit_claude_check() -> None:
+    """Issue #66 fix: an injected backend (skip_cli_presence) bypasses the CLI check."""
+    snap = _snap("both-open.json")
+    choice = choose(
+        _plan(),
+        snap,
+        _coeffs(),
+        _cfg(),
+        explicit_lane="claude",
+        env=ALL_PRESENT_ENV,
+        which=lambda _n: None,
+        skip_cli_presence=True,
+    )
+    assert choice.lane == "claude"
+    claude = next(p for p in choice.projections if p.lane == "claude")
+    assert claude.available is False  # the table still reports the real CLI as absent
+    assert claude.reason == "claude CLI not on PATH"
+
+
+def test_choose_skip_cli_presence_does_not_bypass_gemini_key() -> None:
+    """skip_cli_presence is about the real CLI only; Gemini's key still gates it."""
+    snap = _snap("both-open.json")
+    with pytest.raises(NoVisionLane):
+        choose(
+            _plan(),
+            snap,
+            _coeffs(),
+            _cfg(),
+            explicit_lane="gemini",
+            env={},
+            which=_all_present_which,
+            skip_cli_presence=True,
+        )
+
+
 def test_choose_explicit_codex_without_cli_raises() -> None:
     """Issue #66: an explicit lane with a missing CLI raises, unlike a quota skip."""
     snap = _snap("both-open.json")

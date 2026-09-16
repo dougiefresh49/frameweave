@@ -216,7 +216,9 @@ def run(
     resolved = resolved if resolved is not None else picked.resolve(raw_input)
     # Resolve auto with an upper-bound plan so run_key has a concrete lane;
     # describe re-runs choose with the actual frame plan (issue #26).
-    config, early_choice, _early_snap = _with_resolved_lane(config, resolved=resolved)
+    config, early_choice, _early_snap = _with_resolved_lane(
+        config, resolved=resolved, has_backend=vision is not None
+    )
     source_dir = Path(config.cache_dir) / "sources" / resolved.video_id
     source_dir.mkdir(parents=True, exist_ok=True)
     locked = range_spec is not None
@@ -514,6 +516,7 @@ def _with_resolved_lane(
     resolved: Resolved | None = None,
     frames: int | None = None,
     transcript_minutes: float | None = None,
+    has_backend: bool = False,
 ) -> tuple[Config, dict[str, Any] | None, Any]:
     """Resolve ``auto``, and validate any checkable lane, via the usage-aware chooser.
 
@@ -521,6 +524,12 @@ def _with_resolved_lane(
     ``none`` needs neither. Called before stage 1 so a missing key or CLI (issue
     #66) raises ``NoVisionLane`` before anything is downloaded or transcribed.
     Returns ``(config, lane_choice dict, snapshot used for the choice)``.
+
+    ``has_backend`` is set when the caller already supplied a ``VisionBackend``
+    object (tests' fakes, or any future custom wiring): the real CLI's presence
+    no longer gates an explicit claude/codex lane, since the injected backend
+    is what actually runs, not ``make_backend``'s CLI subprocess. Gemini's key
+    and the quota logic are unchanged.
     """
     if config.vision_lane == "none":
         return config, None, None
@@ -550,7 +559,14 @@ def _with_resolved_lane(
         frames_per_call=max(1, int(config.frames_per_call)),
     )
     explicit = None if config.vision_lane == "auto" else config.vision_lane
-    choice = choose(plan, snapshot, get_coefficients(), config, explicit_lane=explicit)
+    choice = choose(
+        plan,
+        snapshot,
+        get_coefficients(),
+        config,
+        explicit_lane=explicit,
+        skip_cli_presence=has_backend,
+    )
     return replace(config, vision_lane=choice.lane), choice_to_dict(choice), snapshot
 
 
@@ -867,6 +883,7 @@ def _stage_describe(ctx: RunContext) -> StageResult:
             resolved=ctx.resolved,
             frames=len(frames),
             transcript_minutes=minutes,
+            has_backend=ctx.vision is not None,
         )
         ctx.config = config
         if choice_dict is not None:

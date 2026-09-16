@@ -1072,3 +1072,21 @@ def test_auto_raises_before_fetch_when_no_lane_available(
             vision=FakeVision(),
         )
     assert source.fetch_calls == 0
+
+
+def test_explicit_lane_with_injected_backend_runs_without_real_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #66 fix: an injected backend makes the real claude CLI's absence moot."""
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path, vision_lane="claude")
+    outcome = run(
+        str(video),
+        cfg,
+        source=FakeSource(video=video),
+        stt=FakeStt(),
+        vision=FakeVision(),
+    )
+    assert outcome.completion == "complete"
+    assert outcome.vision_lane == "claude"

@@ -322,6 +322,7 @@ def choose(
     *,
     env: Mapping[str, str] | None = None,
     which: Callable[[str], str | None] | None = None,
+    skip_cli_presence: bool = False,
 ) -> Choice:
     """Pick a vision lane. Pure given ``snapshot`` (no I/O).
 
@@ -335,6 +336,13 @@ def choose(
     ``os.environ`` and ``shutil.which`` and are injected in tests. Quota-based
     skip (``lane_skip_percent``) is bypassed for an explicit lane as before
     (decision 40); only a missing key or CLI blocks it.
+
+    ``skip_cli_presence`` bypasses the real-CLI check (``claude``/``codex``
+    only, never Gemini's key) for an explicit named lane: the caller (the
+    pipeline) sets it when it already has a working ``VisionBackend`` object,
+    so the real CLI's absence is moot — the injected backend, not
+    ``make_backend``'s subprocess, is what actually runs. Auto mode is
+    unaffected; the projections table still reports the real CLI's presence.
     """
     env = os.environ if env is None else env
     which = shutil.which if which is None else which
@@ -386,8 +394,11 @@ def choose(
                 reason="explicit lane",
                 warning=warning,
             )
-        # Quota skip is bypassable for an explicit lane; a missing key or CLI is not.
-        if _presence_reason(named, env, which) is not None:
+        # Quota skip is bypassable for an explicit lane; a missing key or CLI is
+        # not, unless an injected backend already made the real CLI moot.
+        presence_reason = _presence_reason(named, env, which)
+        bypassed = skip_cli_presence and named in ("claude", "codex")
+        if presence_reason is not None and not bypassed:
             raise NoVisionLane(_lane_unavailable_message(projections, lane=named))
         return Choice(
             lane=named,
