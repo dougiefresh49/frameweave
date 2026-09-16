@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import shutil
 import statistics
 import subprocess
 import tomllib
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import resources
@@ -54,6 +57,47 @@ _METERED_LANES = frozenset({"gemini"})
 METERED_LANES = _METERED_LANES
 
 _COEFFICIENTS: dict[str, dict[str, float]] | None = None
+
+_PRESENCE_REASONS: dict[str, str] = {
+    "gemini": "GEMINI_API_KEY not set",
+    "claude": "claude CLI not on PATH",
+    "codex": "codex CLI not on PATH",
+}
+
+
+class NoVisionLane(RuntimeError):
+    """No vision lane is available (or the explicit lane named is unavailable)."""
+
+
+def _presence_reason(
+    lane: str,
+    env: Mapping[str, str],
+    which: Callable[[str], str | None],
+) -> str | None:
+    """``None`` when the lane's key or CLI is present; the reason string otherwise."""
+    if lane == "gemini":
+        key = env.get("GEMINI_API_KEY", "")
+        return None if key and key.strip() else _PRESENCE_REASONS["gemini"]
+    if lane in ("claude", "codex"):
+        return None if which(lane) is not None else _PRESENCE_REASONS[lane]
+    return None
+
+
+def _lane_unavailable_message(
+    projections: list[Projection], *, lane: str | None = None
+) -> str:
+    """Message for ``NoVisionLane``: every candidate's reason plus the doctor remedy."""
+    header = (
+        f"vision lane {lane!r} is unavailable" if lane else "no vision lane is available"
+    )
+    lines = [f"{header}:"]
+    for proj in projections:
+        if proj.lane == "none":
+            continue
+        status = "available" if proj.available else (proj.reason or "unavailable")
+        lines.append(f"  {proj.lane}: {status}")
+    lines.append("Run `frameweave doctor` for remedies.")
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -191,8 +235,30 @@ def project(
     snapshot: Snapshot | None,
     *,
     skip_percent: float = 90.0,
+    env: Mapping[str, str] | None = None,
+    which: Callable[[str], str | None] | None = None,
 ) -> Projection:
-    """Project tokens, dollars, and window percents for one lane."""
+    """Project tokens, dollars, and window percents for one lane.
+
+    ``env`` and ``which`` default to ``os.environ`` and ``shutil.which`` and are
+    injected in tests. Availability from quota (usage windows) and availability
+    from presence (key or CLI) combine; ``reason`` names whichever failed first,
+    presence taking priority since a missing key or binary can't be worked around.
+    """
+    if lane == "none":
+        return Projection(
+            lane=lane,
+            tokens=0,
+            calls=0,
+            usd=0.0,
+            windows={},
+            available=True,
+            reason=None,
+        )
+
+    env = os.environ if env is None else env
+    which = shutil.which if which is None else which
+
     calls = math.ceil(frames / frames_per_call) if frames else 0
     coeffs = coefficients.get(lane, {})
     a = float(coeffs.get("a", 0.0))
@@ -209,8 +275,8 @@ def project(
         )
 
     windows: dict[str, tuple[float | None, float | None]] = {}
-    available = True
-    reason: str | None = None
+    quota_available = True
+    quota_reason: str | None = None
 
     if lane in _LANE_WINDOWS:
         provider, window_ids, _long = _LANE_WINDOWS[lane]
@@ -225,21 +291,16 @@ def project(
             after = before + delta
             windows[window_id] = (before, after)
             if after > skip_percent:
-                available = False
-                if reason is None:
-                    reason = f"{window_id} would reach {after:.1f}% (skip at {skip_percent:g}%)"
-    # gemini and none have no subscription windows; gemini stays available.
+                quota_available = False
+                if quota_reason is None:
+                    quota_reason = (
+                        f"{window_id} would reach {after:.1f}% (skip at {skip_percent:g}%)"
+                    )
+    # gemini has no subscription windows; only its key presence gates it.
 
-    if lane == "none":
-        return Projection(
-            lane=lane,
-            tokens=0,
-            calls=0,
-            usd=0.0,
-            windows={},
-            available=True,
-            reason=None,
-        )
+    presence_reason = _presence_reason(lane, env, which)
+    available = quota_available and presence_reason is None
+    reason = presence_reason if presence_reason is not None else quota_reason
 
     return Projection(
         lane=lane,
@@ -258,13 +319,33 @@ def choose(
     coefficients: dict[str, dict[str, float]],
     config: Config,
     explicit_lane: str | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    which: Callable[[str], str | None] | None = None,
+    skip_cli_presence: bool = False,
 ) -> Choice:
     """Pick a vision lane. Pure given ``snapshot`` (no I/O).
 
     Auto vs explicit is solely ``explicit_lane``: pass a named lane to bypass the
     chooser, or ``None`` to run the auto rules (config.vision_lane is not read
     for that decision — only ``lane_skip_percent`` and related fields).
+
+    ``choose`` never returns a lane whose key or CLI is missing. With no
+    available candidate, or an explicit lane that is unavailable, it raises
+    ``NoVisionLane`` (issue #66); ``env`` and ``which`` default to
+    ``os.environ`` and ``shutil.which`` and are injected in tests. Quota-based
+    skip (``lane_skip_percent``) is bypassed for an explicit lane as before
+    (decision 40); only a missing key or CLI blocks it.
+
+    ``skip_cli_presence`` bypasses the real-CLI check (``claude``/``codex``
+    only, never Gemini's key) for an explicit named lane: the caller (the
+    pipeline) sets it when it already has a working ``VisionBackend`` object,
+    so the real CLI's absence is moot — the injected backend, not
+    ``make_backend``'s subprocess, is what actually runs. Auto mode is
+    unaffected; the projections table still reports the real CLI's presence.
     """
+    env = os.environ if env is None else env
+    which = shutil.which if which is None else which
     skip = float(config.lane_skip_percent)
     frames = plan.frames
     minutes = plan.transcript_minutes
@@ -286,6 +367,8 @@ def choose(
             coefficients,
             snapshot,
             skip_percent=skip,
+            env=env,
+            which=which,
         )
         for lane in project_lanes
     ]
@@ -295,7 +378,15 @@ def choose(
         warning = CODEX_WARNING if named == "codex" else None
         if named == "none":
             none_proj = project(
-                "none", frames, minutes, per_call, coefficients, snapshot, skip_percent=skip
+                "none",
+                frames,
+                minutes,
+                per_call,
+                coefficients,
+                snapshot,
+                skip_percent=skip,
+                env=env,
+                which=which,
             )
             return Choice(
                 lane="none",
@@ -303,6 +394,12 @@ def choose(
                 reason="explicit lane",
                 warning=warning,
             )
+        # Quota skip is bypassable for an explicit lane; a missing key or CLI is
+        # not, unless an injected backend already made the real CLI moot.
+        presence_reason = _presence_reason(named, env, which)
+        bypassed = skip_cli_presence and named in ("claude", "codex")
+        if presence_reason is not None and not bypassed:
+            raise NoVisionLane(_lane_unavailable_message(projections, lane=named))
         return Choice(
             lane=named,
             projections=projections,
@@ -311,12 +408,27 @@ def choose(
         )
 
     if snapshot is None:
-        return Choice(
-            lane="claude",
-            projections=projections,
-            reason="usage snapshot unavailable; defaulting to claude",
-            warning=USAGE_UNAVAILABLE_WARNING,
-        )
+        claude_proj = by_lane.get("claude")
+        if claude_proj is not None and claude_proj.available:
+            return Choice(
+                lane="claude",
+                projections=projections,
+                reason="usage snapshot unavailable; defaulting to claude",
+                warning=USAGE_UNAVAILABLE_WARNING,
+            )
+        gemini_proj = by_lane.get("gemini")
+        if gemini_proj is not None and gemini_proj.available:
+            return Choice(
+                lane="gemini",
+                projections=projections,
+                reason=(
+                    "usage snapshot unavailable; claude unavailable "
+                    f"({claude_proj.reason if claude_proj else 'unknown'}); "
+                    "falling back to metered gemini"
+                ),
+                warning=USAGE_UNAVAILABLE_WARNING,
+            )
+        raise NoVisionLane(_lane_unavailable_message(projections))
 
     subscription = [
         by_lane[name]
@@ -349,11 +461,13 @@ def choose(
     crossed_reason = "; ".join(
         f"{p.lane}: {p.reason}" for p in crossed if p.reason
     ) or "subscription lanes unavailable"
+    if gemini is None or not gemini.available:
+        raise NoVisionLane(_lane_unavailable_message(projections))
     return Choice(
         lane="gemini",
         projections=projections,
         reason=f"metered fallback ({crossed_reason})",
-        warning=None if gemini is not None else USAGE_UNAVAILABLE_WARNING,
+        warning=None,
     )
 
 

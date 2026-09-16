@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 
@@ -43,3 +44,32 @@ def _isolate_usage_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         "frameweave.vision.choose.DEFAULT_REFRESH_SCRIPT",
         script,
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_vision_lane_presence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make lane presence deterministic (issue #66 CI fix).
+
+    A GitHub runner has no ``claude``/``codex`` CLI and no ``GEMINI_API_KEY``,
+    so any test that lets ``frameweave.vision.choose`` fall back to its real
+    ``os.environ``/``shutil.which`` defaults would see every lane unavailable
+    there, while this Mac (both CLIs installed) sees every lane available.
+    Patch ``shutil.which`` so ``claude``/``codex`` report present (a fake path)
+    while every other name (``ffmpeg``, ``yt-dlp``, ...) still resolves for
+    real, and set ``GEMINI_API_KEY`` in the environment the chooser reads.
+
+    Tests that specifically exercise an unavailable lane pass their own
+    ``env=``/``which=`` kwargs to ``choose``/``project`` directly (bypassing
+    this fixture entirely), or call ``monkeypatch.delenv``/
+    ``monkeypatch.setattr("shutil.which", ...)`` in the test body, which runs
+    after fixture setup and so overrides it.
+    """
+    real_which = shutil.which
+
+    def fake_which(name: str, *args: object, **kwargs: object) -> str | None:
+        if name in ("claude", "codex"):
+            return f"/usr/bin/{name}"
+        return real_which(name, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")

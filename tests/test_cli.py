@@ -471,6 +471,40 @@ def test_inspect_prints_lane_projection_table(
     assert "chosen:" in text
 
 
+def test_inspect_projection_table_shows_reason_not_no(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #66 decision 3: the availability column prints the reason, not 'no'."""
+    from datetime import UTC, datetime
+
+    from frameweave.vision.choose import Snapshot
+
+    snap = Snapshot(
+        generated_at=datetime(2026, 9, 16, 18, 0, 0, tzinfo=UTC),
+        metrics={"claude": {"five_hour": 10.0, "seven_day": 20.0}},
+    )
+    monkeypatch.setattr("frameweave.cli.load_snapshot", lambda *a, **k: snap)
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+
+    video = _video(tmp_path)
+    kwargs = _load_kwargs(tmp_path)
+    kwargs["env"] = {**kwargs["env"], "FRAMEWEAVE_VISION_LANE": "auto"}
+    buf = io.StringIO()
+    code = main(
+        ["inspect", str(video)],
+        backends={"source": FakeSource(video=video)},
+        stdout=buf,
+        **kwargs,
+    )
+    assert code == 0
+    text = buf.getvalue()
+    assert "claude CLI not on PATH" in text
+    assert "chosen: gemini" in text
+    table = text[text.index("lane projection:") :]
+    assert "claude" in table.splitlines()[2] and "not on PATH" in table.splitlines()[2]
+
+
 def test_no_dollars_line_for_lane_none(tmp_path: Path) -> None:
     """Finding 7: lane none omits the dollars estimate line."""
     video = _video(tmp_path)

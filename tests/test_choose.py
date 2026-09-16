@@ -20,6 +20,7 @@ from frameweave.vision import choose as choose_mod
 from frameweave.vision.choose import (
     CODEX_WARNING,
     USAGE_UNAVAILABLE_WARNING,
+    NoVisionLane,
     Plan,
     Snapshot,
     choose,
@@ -39,6 +40,21 @@ MISSING_TOML = Path("/nonexistent/frameweave-test/config.toml")
 # Fresh relative to fixture generatedAt values (2026-09-16T18:00:00Z).
 NOW = datetime(2026, 9, 16, 18, 0, 30, tzinfo=UTC)
 STALE_NOW = datetime(2026, 9, 16, 18, 5, 0, tzinfo=UTC)
+
+# All lanes present (key set, CLIs on PATH): the baseline for tests that exercise
+# quota logic and are unrelated to issue #66's presence checks.
+ALL_PRESENT_ENV = {"GEMINI_API_KEY": "test-key-not-real"}
+
+
+def _all_present_which(name: str) -> str | None:
+    return f"/usr/bin/{name}"
+
+
+def _presence(**overrides: object) -> dict[str, object]:
+    """kwargs for choose()/project() with every lane present unless overridden."""
+    base: dict[str, object] = {"env": ALL_PRESENT_ENV, "which": _all_present_which}
+    base.update(overrides)
+    return base
 
 
 def _cfg(**flags: object):
@@ -82,7 +98,7 @@ def test_project_arithmetic_against_hand_table() -> None:
     """
     snap = _snap("both-open.json")
     coeffs = _coeffs()
-    claude = project("claude", 16, 10.0, 8, coeffs, snap, skip_percent=90)
+    claude = project("claude", 16, 10.0, 8, coeffs, snap, skip_percent=90, **_presence())
     assert claude.calls == 2
     assert claude.tokens == 42538
     assert claude.windows["five_hour"][0] == pytest.approx(10.0)
@@ -90,7 +106,7 @@ def test_project_arithmetic_against_hand_table() -> None:
     assert claude.windows["seven_day"][1] == pytest.approx(20.170152)
     assert claude.available is True
 
-    gemini = project("gemini", 16, 10.0, 8, coeffs, snap, skip_percent=90)
+    gemini = project("gemini", 16, 10.0, 8, coeffs, snap, skip_percent=90, **_presence())
     assert gemini.tokens == 22840
     assert gemini.usd == pytest.approx(0.011652)
     assert gemini.windows == {}
@@ -100,7 +116,7 @@ def test_project_arithmetic_against_hand_table() -> None:
 def test_both_open_picks_claude_by_headroom() -> None:
     """Only Claude is a subscription auto-candidate (decision 47); it wins when open."""
     snap = _snap("both-open.json")
-    choice = choose(_plan(), snap, _coeffs(), _cfg(), explicit_lane=None)
+    choice = choose(_plan(), snap, _coeffs(), _cfg(), explicit_lane=None, **_presence())
     assert choice.lane == "claude"
     assert choice.warning is None
     assert any(p.lane == "gemini" for p in choice.projections)
@@ -110,7 +126,7 @@ def test_claude_5h_crossing_falls_to_gemini() -> None:
     """Claude at 89% with a run that crosses 90 is skipped; metered Gemini wins."""
     snap = _snap("claude-5h-at-89.json")
     # 40 frames / 8 = 5 calls → ~107k tokens → five_hour delta ~1.8 → after ~90.8
-    choice = choose(_plan(40, 30.0), snap, _coeffs(), _cfg(), explicit_lane=None)
+    choice = choose(_plan(40, 30.0), snap, _coeffs(), _cfg(), explicit_lane=None, **_presence())
     assert choice.lane == "gemini"
     claude = next(p for p in choice.projections if p.lane == "claude")
     assert claude.available is False
@@ -124,11 +140,11 @@ def test_skip_percent_from_config_at_75() -> None:
     # 120 frames → five_hour delta ~5.15 → 70+5.15 crosses 75, stays under 90.
     plan = _plan(120, 30.0)
     cfg75 = _cfg(lane_skip_percent=75)
-    choice = choose(plan, snap, _coeffs(), cfg75, explicit_lane=None)
+    choice = choose(plan, snap, _coeffs(), cfg75, explicit_lane=None, **_presence())
     assert choice.lane == "gemini"
 
     cfg90 = _cfg(lane_skip_percent=90)
-    open_choice = choose(plan, snap, _coeffs(), cfg90, explicit_lane=None)
+    open_choice = choose(plan, snap, _coeffs(), cfg90, explicit_lane=None, **_presence())
     assert open_choice.lane == "claude"
 
     # Env var path: FRAMEWEAVE_LANE_SKIP_PERCENT
@@ -139,12 +155,12 @@ def test_skip_percent_from_config_at_75() -> None:
         dotenv_paths=[],
     )
     assert from_env.lane_skip_percent == 75
-    assert choose(plan, snap, _coeffs(), from_env).lane == "gemini"
+    assert choose(plan, snap, _coeffs(), from_env, **_presence()).lane == "gemini"
 
 
 def test_both_crossing_returns_gemini_with_reason() -> None:
     snap = _snap("both-crossing.json")
-    choice = choose(_plan(40, 30.0), snap, _coeffs(), _cfg(), explicit_lane=None)
+    choice = choose(_plan(40, 30.0), snap, _coeffs(), _cfg(), explicit_lane=None, **_presence())
     assert choice.lane == "gemini"
     assert "metered fallback" in choice.reason
     assert "five_hour" in choice.reason or "seven_day" in choice.reason
@@ -158,6 +174,7 @@ def test_explicit_lane_bypasses_skip() -> None:
         _coeffs(),
         _cfg(),
         explicit_lane="claude",
+        **_presence(),
     )
     assert choice.lane == "claude"
     assert choice.reason == "explicit lane"
@@ -173,10 +190,176 @@ def test_explicit_codex_warning() -> None:
         _coeffs(),
         _cfg(),
         explicit_lane="codex",
+        **_presence(),
     )
     assert choice.lane == "codex"
     assert choice.warning == CODEX_WARNING
     assert any(p.lane == "codex" for p in choice.projections)
+
+
+def test_project_gemini_unavailable_without_key() -> None:
+    """Issue #66: a blank or absent GEMINI_API_KEY makes gemini unavailable."""
+    snap = _snap("both-open.json")
+    absent = project("gemini", 16, 10.0, 8, _coeffs(), snap, env={}, which=_all_present_which)
+    assert absent.available is False
+    assert absent.reason == "GEMINI_API_KEY not set"
+
+    blank = project(
+        "gemini",
+        16,
+        10.0,
+        8,
+        _coeffs(),
+        snap,
+        env={"GEMINI_API_KEY": "  "},
+        which=_all_present_which,
+    )
+    assert blank.available is False
+    assert blank.reason == "GEMINI_API_KEY not set"
+
+
+def test_project_claude_unavailable_without_cli() -> None:
+    """Issue #66: claude is unavailable when the CLI is not on PATH."""
+    snap = _snap("both-open.json")
+    proj = project(
+        "claude", 16, 10.0, 8, _coeffs(), snap, env=ALL_PRESENT_ENV, which=lambda _n: None
+    )
+    assert proj.available is False
+    assert proj.reason == "claude CLI not on PATH"
+
+
+def test_project_codex_unavailable_without_cli() -> None:
+    """Issue #66: codex is unavailable when the CLI is not on PATH."""
+    snap = _snap("both-open.json")
+    proj = project(
+        "codex", 16, 10.0, 8, _coeffs(), snap, env=ALL_PRESENT_ENV, which=lambda _n: None
+    )
+    assert proj.available is False
+    assert proj.reason == "codex CLI not on PATH"
+
+
+def test_project_presence_reason_wins_over_quota_reason() -> None:
+    """Issue #66: presence and quota unavailability combine; presence names the reason."""
+    snap = _snap("claude-5h-at-89.json")
+    proj = project(
+        "claude", 40, 30.0, 8, _coeffs(), snap, skip_percent=90, env={}, which=lambda _n: None
+    )
+    assert proj.available is False
+    assert proj.reason == "claude CLI not on PATH"
+
+
+def test_choose_falls_back_to_gemini_when_claude_cli_missing() -> None:
+    """Issue #66: claude CLI missing makes it a non-candidate; gemini (key set) wins."""
+    snap = _snap("both-open.json")
+    choice = choose(
+        _plan(),
+        snap,
+        _coeffs(),
+        _cfg(),
+        explicit_lane=None,
+        env=ALL_PRESENT_ENV,
+        which=lambda _n: None,
+    )
+    assert choice.lane == "gemini"
+    claude = next(p for p in choice.projections if p.lane == "claude")
+    assert claude.available is False
+    assert claude.reason == "claude CLI not on PATH"
+
+
+def test_choose_raises_when_no_lane_available() -> None:
+    """Issue #66: claude CLI missing and no Gemini key leaves no candidate."""
+    snap = _snap("both-open.json")
+    with pytest.raises(NoVisionLane) as excinfo:
+        choose(
+            _plan(),
+            snap,
+            _coeffs(),
+            _cfg(),
+            explicit_lane=None,
+            env={},
+            which=lambda _n: None,
+        )
+    message = str(excinfo.value)
+    assert "claude" in message
+    assert "gemini" in message
+    assert "frameweave doctor" in message
+
+
+def test_choose_explicit_gemini_without_key_raises_naming_lane() -> None:
+    """Issue #66 acceptance: explicit --vision gemini without a key fails before stage 1."""
+    snap = _snap("both-open.json")
+    with pytest.raises(NoVisionLane) as excinfo:
+        choose(
+            _plan(),
+            snap,
+            _coeffs(),
+            _cfg(),
+            explicit_lane="gemini",
+            env={},
+            which=_all_present_which,
+        )
+    assert "gemini" in str(excinfo.value)
+
+
+def test_choose_skip_cli_presence_bypasses_explicit_claude_check() -> None:
+    """Issue #66 fix: an injected backend (skip_cli_presence) bypasses the CLI check."""
+    snap = _snap("both-open.json")
+    choice = choose(
+        _plan(),
+        snap,
+        _coeffs(),
+        _cfg(),
+        explicit_lane="claude",
+        env=ALL_PRESENT_ENV,
+        which=lambda _n: None,
+        skip_cli_presence=True,
+    )
+    assert choice.lane == "claude"
+    claude = next(p for p in choice.projections if p.lane == "claude")
+    assert claude.available is False  # the table still reports the real CLI as absent
+    assert claude.reason == "claude CLI not on PATH"
+
+
+def test_choose_skip_cli_presence_does_not_bypass_gemini_key() -> None:
+    """skip_cli_presence is about the real CLI only; Gemini's key still gates it."""
+    snap = _snap("both-open.json")
+    with pytest.raises(NoVisionLane):
+        choose(
+            _plan(),
+            snap,
+            _coeffs(),
+            _cfg(),
+            explicit_lane="gemini",
+            env={},
+            which=_all_present_which,
+            skip_cli_presence=True,
+        )
+
+
+def test_choose_explicit_codex_without_cli_raises() -> None:
+    """Issue #66: an explicit lane with a missing CLI raises, unlike a quota skip."""
+    snap = _snap("both-open.json")
+    with pytest.raises(NoVisionLane):
+        choose(
+            _plan(),
+            snap,
+            _coeffs(),
+            _cfg(),
+            explicit_lane="codex",
+            env=ALL_PRESENT_ENV,
+            which=lambda _n: None,
+        )
+
+
+def test_project_defaults_use_os_environ_and_shutil_which() -> None:
+    """No env/which override reads the real process environment (default seam)."""
+    snap = _snap("both-open.json")
+    proj = project("gemini", 16, 10.0, 8, _coeffs(), snap)
+    # Whatever this machine's real GEMINI_API_KEY state is, the reason is exact.
+    if proj.available:
+        assert proj.reason is None
+    else:
+        assert proj.reason == "GEMINI_API_KEY not set"
 
 
 def test_choose_ignores_config_vision_lane_for_auto() -> None:
@@ -188,6 +371,7 @@ def test_choose_ignores_config_vision_lane_for_auto() -> None:
         _coeffs(),
         _cfg(vision_lane="gemini"),
         explicit_lane=None,
+        **_presence(),
     )
     assert choice.lane == "claude"
     assert choice.reason != "explicit lane"
@@ -203,7 +387,7 @@ def test_stale_snapshot_without_refresh_defaults_to_claude() -> None:
         now=STALE_NOW,
     )
     assert snap is None
-    choice = choose(_plan(), None, _coeffs(), _cfg(), explicit_lane=None)
+    choice = choose(_plan(), None, _coeffs(), _cfg(), explicit_lane=None, **_presence())
     assert choice.lane == "claude"
     assert choice.warning == USAGE_UNAVAILABLE_WARNING
 
@@ -222,7 +406,7 @@ def test_refresh_script_failure_defaults_to_claude(tmp_path: Path) -> None:
         now=STALE_NOW,
     )
     assert snap is None
-    choice = choose(_plan(), None, _coeffs(), _cfg(), explicit_lane=None)
+    choice = choose(_plan(), None, _coeffs(), _cfg(), explicit_lane=None, **_presence())
     assert choice.lane == "claude"
     assert choice.warning == USAGE_UNAVAILABLE_WARNING
 
@@ -235,16 +419,34 @@ def test_missing_snapshot_defaults_to_claude() -> None:
         now=NOW,
     )
     assert snap is None
-    choice = choose(_plan(), None, _coeffs(), _cfg())
+    choice = choose(_plan(), None, _coeffs(), _cfg(), **_presence())
     assert choice.lane == "claude"
     assert choice.warning == USAGE_UNAVAILABLE_WARNING
 
 
 def test_none_snapshot_prints_na_not_zero_before() -> None:
-    choice = choose(_plan(), None, _coeffs(), _cfg(), explicit_lane=None)
+    choice = choose(_plan(), None, _coeffs(), _cfg(), explicit_lane=None, **_presence())
     table = format_projection_table(choice)
     assert "n/a" in table
     assert "five_hour 0.0->" not in table
+
+
+def test_projection_table_prints_reason_not_no() -> None:
+    """Issue #66 decision 3: the availability column shows the reason, never 'no'."""
+    snap = _snap("both-open.json")
+    choice = choose(
+        _plan(),
+        snap,
+        _coeffs(),
+        _cfg(),
+        explicit_lane=None,
+        env=ALL_PRESENT_ENV,
+        which=lambda _n: None,
+    )
+    table = format_projection_table(choice)
+    assert "claude CLI not on PATH" in table
+    assert " no\n" not in table
+    assert not table.rstrip().endswith(" no")
 
 
 def test_fable_limit_row_never_used_as_headroom() -> None:
@@ -254,10 +456,10 @@ def test_fable_limit_row_never_used_as_headroom() -> None:
         "claude", {}
     )
     # seven_day_sonnet is present in the file but is not a chooser window either.
-    claude = project("claude", 8, 1.0, 8, _coeffs(), snap, skip_percent=90)
+    claude = project("claude", 8, 1.0, 8, _coeffs(), snap, skip_percent=90, **_presence())
     assert set(claude.windows) == {"five_hour", "seven_day"}
     assert claude.windows["seven_day"][0] == pytest.approx(12.0)
-    choice = choose(_plan(8, 1.0), snap, _coeffs(), _cfg())
+    choice = choose(_plan(8, 1.0), snap, _coeffs(), _cfg(), **_presence())
     assert choice.lane == "claude"
 
 
