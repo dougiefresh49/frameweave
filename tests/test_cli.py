@@ -514,3 +514,13 @@ def test_cache_size(tmp_path: Path) -> None:
     code = main(["cache", "size"], stdout=buf, **kwargs)
     assert code == 0
     assert "cache:" in buf.getvalue()
+
+
+def test_format_cost_prints_dollars_for_metered_or_nonzero() -> None:
+    """Auto→gemini must not say subscription; any cost_usd > 0 prints dollars."""
+    from frameweave.cli import _format_cost
+
+    assert _format_cost(0.012, "gemini") == "cost: $0.012"
+    assert _format_cost(0.0, "gemini") == "cost: $0.000"
+    assert _format_cost(0.0, "claude") == "cost: $0.000 (subscription)"
+    assert _format_cost(0.05, "claude") == "cost: $0.050"

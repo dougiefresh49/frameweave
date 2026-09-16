@@ -14,7 +14,6 @@ import shutil
 import sys
 import traceback
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -39,18 +38,20 @@ from frameweave.util.media import NotMediaError
 from frameweave.util.retry import RequestTimeout
 from frameweave.vision import VisionFailed
 from frameweave.vision.choose import (
-    COEFFICIENTS,
+    METERED_LANES,
+    SUBSCRIPTION_LANES,
     Plan,
     choose,
     format_projection_table,
     format_recalibrate_toml,
+    get_coefficients,
     load_snapshot,
     recalibrate,
+    resolve_usage_paths,
 )
 
-# Projection coefficients live in config/lanes.toml (issue #26).
+# Projection coefficients live in the packaged lanes.toml (issue #26).
 _GB = 1024**3
-_SUBSCRIPTION_LANES = frozenset({"claude", "codex"})
 # Dest names that are CLI/pipeline control, not Config fields.
 _CLI_ONLY_DESTS = frozenset(
     {"debug", "dry_run", "doctor_json", "redo", "frames_only", "out", "start", "end", "chapter"}
@@ -364,7 +365,7 @@ def _cmd_run(
         _print_estimate(resolved, config, out)
 
     print(str(outcome.output_path.resolve()), file=out)
-    print(_format_cost(outcome.cost_usd, config.vision_lane), file=out)
+    print(_format_cost(outcome.cost_usd, outcome.vision_lane), file=out)
 
     if outcome.completion.startswith("incomplete") and not frames_only:
         return 2
@@ -436,11 +437,18 @@ def _print_estimate(resolved: Resolved, config: Config, out: TextIO) -> None:
         transcript_minutes=resolved.duration / 60.0,
         frames_per_call=per_call,
     )
-    snapshot = load_snapshot()
+    snap_path, refresh_script = resolve_usage_paths(config)
+    # Load usage only for auto (chooser) or a subscription lane's window projection.
+    if config.vision_lane == "auto" or config.vision_lane in SUBSCRIPTION_LANES:
+        snapshot = load_snapshot(
+            snap_path, refresh=True, refresh_script=refresh_script
+        )
+    else:
+        snapshot = None
     explicit = None if config.vision_lane == "auto" else config.vision_lane
-    # choose() reads config.vision_lane for explicit; pass auto so explicit_lane rules.
-    choose_config = config if explicit is None else replace(config, vision_lane="auto")
-    choice = choose(plan, snapshot, COEFFICIENTS, choose_config, explicit_lane=explicit)
+    choice = choose(
+        plan, snapshot, get_coefficients(), config, explicit_lane=explicit
+    )
     lane = choice.lane
 
     print(f"title: {resolved.title}", file=out)
@@ -466,7 +474,7 @@ def _print_estimate(resolved: Resolved, config: Config, out: TextIO) -> None:
         print(format_projection_table(choice), file=out)
     if lane == "none":
         return
-    if lane == "gemini":
+    if lane in METERED_LANES:
         model = config.vision_model.get("gemini", "gemini-3.5-flash-lite")
         dollars = chosen_proj.usd if chosen_proj is not None else 0.0
         print(f"dollars (est): ${dollars:.4f} ({model})", file=out)
@@ -508,8 +516,10 @@ def _print_frames_line(
 
 
 def _format_cost(cost_usd: float, vision_lane: str) -> str:
-    lane = "claude" if vision_lane == "auto" else vision_lane
-    if lane in _SUBSCRIPTION_LANES:
+    """Print dollars whenever spend is non-zero or the lane is metered."""
+    if cost_usd > 0 or vision_lane in METERED_LANES:
+        return f"cost: ${cost_usd:.3f}"
+    if vision_lane in SUBSCRIPTION_LANES or vision_lane == "auto":
         return "cost: $0.000 (subscription)"
     return f"cost: ${cost_usd:.3f}"
 

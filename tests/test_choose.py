@@ -8,20 +8,26 @@ percentUsed). No live refresh or provider API is called.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+import stat
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from frameweave.config import load
+from frameweave.preflight import MODULES
 from frameweave.vision import choose as choose_mod
 from frameweave.vision.choose import (
     CODEX_WARNING,
-    COEFFICIENTS,
     USAGE_UNAVAILABLE_WARNING,
     Plan,
+    Snapshot,
     choose,
+    format_projection_table,
     format_recalibrate_toml,
+    get_coefficients,
+    lane_actual_from_run,
+    load_coefficients,
     load_snapshot,
     preflight_checks,
     project,
@@ -52,6 +58,10 @@ def _plan(frames: int = 16, minutes: float = 10.0, per_call: int = 8) -> Plan:
     return Plan(frames=frames, transcript_minutes=minutes, frames_per_call=per_call)
 
 
+def _coeffs() -> dict[str, dict[str, float]]:
+    return get_coefficients()
+
+
 def test_project_arithmetic_against_hand_table() -> None:
     """Hand-computed table (decision 48 coefficients).
 
@@ -71,7 +81,8 @@ def test_project_arithmetic_against_hand_table() -> None:
           = 0.011652
     """
     snap = _snap("both-open.json")
-    claude = project("claude", 16, 10.0, 8, COEFFICIENTS, snap, skip_percent=90)
+    coeffs = _coeffs()
+    claude = project("claude", 16, 10.0, 8, coeffs, snap, skip_percent=90)
     assert claude.calls == 2
     assert claude.tokens == 42538
     assert claude.windows["five_hour"][0] == pytest.approx(10.0)
@@ -79,7 +90,7 @@ def test_project_arithmetic_against_hand_table() -> None:
     assert claude.windows["seven_day"][1] == pytest.approx(20.170152)
     assert claude.available is True
 
-    gemini = project("gemini", 16, 10.0, 8, COEFFICIENTS, snap, skip_percent=90)
+    gemini = project("gemini", 16, 10.0, 8, coeffs, snap, skip_percent=90)
     assert gemini.tokens == 22840
     assert gemini.usd == pytest.approx(0.011652)
     assert gemini.windows == {}
@@ -89,7 +100,7 @@ def test_project_arithmetic_against_hand_table() -> None:
 def test_both_open_picks_claude_by_headroom() -> None:
     """Only Claude is a subscription auto-candidate (decision 47); it wins when open."""
     snap = _snap("both-open.json")
-    choice = choose(_plan(), snap, COEFFICIENTS, _cfg(), explicit_lane=None)
+    choice = choose(_plan(), snap, _coeffs(), _cfg(), explicit_lane=None)
     assert choice.lane == "claude"
     assert choice.warning is None
     assert any(p.lane == "gemini" for p in choice.projections)
@@ -99,7 +110,7 @@ def test_claude_5h_crossing_falls_to_gemini() -> None:
     """Claude at 89% with a run that crosses 90 is skipped; metered Gemini wins."""
     snap = _snap("claude-5h-at-89.json")
     # 40 frames / 8 = 5 calls → ~107k tokens → five_hour delta ~1.8 → after ~90.8
-    choice = choose(_plan(40, 30.0), snap, COEFFICIENTS, _cfg(), explicit_lane=None)
+    choice = choose(_plan(40, 30.0), snap, _coeffs(), _cfg(), explicit_lane=None)
     assert choice.lane == "gemini"
     claude = next(p for p in choice.projections if p.lane == "claude")
     assert claude.available is False
@@ -113,11 +124,11 @@ def test_skip_percent_from_config_at_75() -> None:
     # 120 frames → five_hour delta ~5.15 → 70+5.15 crosses 75, stays under 90.
     plan = _plan(120, 30.0)
     cfg75 = _cfg(lane_skip_percent=75)
-    choice = choose(plan, snap, COEFFICIENTS, cfg75, explicit_lane=None)
+    choice = choose(plan, snap, _coeffs(), cfg75, explicit_lane=None)
     assert choice.lane == "gemini"
 
     cfg90 = _cfg(lane_skip_percent=90)
-    open_choice = choose(plan, snap, COEFFICIENTS, cfg90, explicit_lane=None)
+    open_choice = choose(plan, snap, _coeffs(), cfg90, explicit_lane=None)
     assert open_choice.lane == "claude"
 
     # Env var path: FRAMEWEAVE_LANE_SKIP_PERCENT
@@ -128,14 +139,15 @@ def test_skip_percent_from_config_at_75() -> None:
         dotenv_paths=[],
     )
     assert from_env.lane_skip_percent == 75
-    assert choose(plan, snap, COEFFICIENTS, from_env).lane == "gemini"
+    assert choose(plan, snap, _coeffs(), from_env).lane == "gemini"
 
 
 def test_both_crossing_returns_gemini_with_reason() -> None:
     snap = _snap("both-crossing.json")
-    choice = choose(_plan(40, 30.0), snap, COEFFICIENTS, _cfg(), explicit_lane=None)
+    choice = choose(_plan(40, 30.0), snap, _coeffs(), _cfg(), explicit_lane=None)
     assert choice.lane == "gemini"
-    assert "five_hour" in choice.reason or "seven_day" in choice.reason or "claude" in choice.reason
+    assert "metered fallback" in choice.reason
+    assert "five_hour" in choice.reason or "seven_day" in choice.reason
 
 
 def test_explicit_lane_bypasses_skip() -> None:
@@ -143,8 +155,8 @@ def test_explicit_lane_bypasses_skip() -> None:
     choice = choose(
         _plan(40, 30.0),
         snap,
-        COEFFICIENTS,
-        _cfg(vision_lane="claude"),
+        _coeffs(),
+        _cfg(),
         explicit_lane="claude",
     )
     assert choice.lane == "claude"
@@ -158,13 +170,27 @@ def test_explicit_codex_warning() -> None:
     choice = choose(
         _plan(),
         snap,
-        COEFFICIENTS,
-        _cfg(vision_lane="codex"),
+        _coeffs(),
+        _cfg(),
         explicit_lane="codex",
     )
     assert choice.lane == "codex"
     assert choice.warning == CODEX_WARNING
     assert any(p.lane == "codex" for p in choice.projections)
+
+
+def test_choose_ignores_config_vision_lane_for_auto() -> None:
+    """explicit_lane=None runs auto rules even when config.vision_lane is named."""
+    snap = _snap("both-open.json")
+    choice = choose(
+        _plan(),
+        snap,
+        _coeffs(),
+        _cfg(vision_lane="gemini"),
+        explicit_lane=None,
+    )
+    assert choice.lane == "claude"
+    assert choice.reason != "explicit lane"
 
 
 def test_stale_snapshot_without_refresh_defaults_to_claude() -> None:
@@ -177,7 +203,26 @@ def test_stale_snapshot_without_refresh_defaults_to_claude() -> None:
         now=STALE_NOW,
     )
     assert snap is None
-    choice = choose(_plan(), None, COEFFICIENTS, _cfg(), explicit_lane=None)
+    choice = choose(_plan(), None, _coeffs(), _cfg(), explicit_lane=None)
+    assert choice.lane == "claude"
+    assert choice.warning == USAGE_UNAVAILABLE_WARNING
+
+
+def test_refresh_script_failure_defaults_to_claude(tmp_path: Path) -> None:
+    """Stale snapshot + refresh script that exits non-zero → unavailable → claude."""
+    stale = tmp_path / "stale-snap.json"
+    stale.write_text((FIXTURES / "stale.json").read_text(encoding="utf-8"), encoding="utf-8")
+    script = tmp_path / "fail-refresh.sh"
+    script.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    snap = load_snapshot(
+        stale,
+        refresh=True,
+        refresh_script=script,
+        now=STALE_NOW,
+    )
+    assert snap is None
+    choice = choose(_plan(), None, _coeffs(), _cfg(), explicit_lane=None)
     assert choice.lane == "claude"
     assert choice.warning == USAGE_UNAVAILABLE_WARNING
 
@@ -190,9 +235,16 @@ def test_missing_snapshot_defaults_to_claude() -> None:
         now=NOW,
     )
     assert snap is None
-    choice = choose(_plan(), None, COEFFICIENTS, _cfg())
+    choice = choose(_plan(), None, _coeffs(), _cfg())
     assert choice.lane == "claude"
     assert choice.warning == USAGE_UNAVAILABLE_WARNING
+
+
+def test_none_snapshot_prints_na_not_zero_before() -> None:
+    choice = choose(_plan(), None, _coeffs(), _cfg(), explicit_lane=None)
+    table = format_projection_table(choice)
+    assert "n/a" in table
+    assert "five_hour 0.0->" not in table
 
 
 def test_fable_limit_row_never_used_as_headroom() -> None:
@@ -202,24 +254,59 @@ def test_fable_limit_row_never_used_as_headroom() -> None:
         "claude", {}
     )
     # seven_day_sonnet is present in the file but is not a chooser window either.
-    claude = project("claude", 8, 1.0, 8, COEFFICIENTS, snap, skip_percent=90)
+    claude = project("claude", 8, 1.0, 8, _coeffs(), snap, skip_percent=90)
     assert set(claude.windows) == {"five_hour", "seven_day"}
     assert claude.windows["seven_day"][0] == pytest.approx(12.0)
-    choice = choose(_plan(8, 1.0), snap, COEFFICIENTS, _cfg())
+    choice = choose(_plan(8, 1.0), snap, _coeffs(), _cfg())
     assert choice.lane == "claude"
 
 
-def test_recalibrate_medians(tmp_path: Path) -> None:
+def test_recalibrate_single_batch_keeps_a_derives_b(tmp_path: Path) -> None:
+    """One batch size: keep packaged a, derive b from tokens_per_call = a + b*fpc."""
+    # a=3997, fpc=8 → tpc = 3997 + 2034*8 = 20269 → b = 2034
     files: list[Path] = []
-    # tokens_per_frame: 10, 20, 30 → median 20; tokens_per_call: 100, 200, 300 → 200
-    for i, (tpf, tpc) in enumerate(((10, 100), (20, 200), (30, 300))):
+    for i in range(3):
         path = tmp_path / f"cost-{i}.json"
         path.write_text(
             json.dumps(
                 {
                     "lane_actual": {
                         "lane": "claude",
-                        "tokens_per_frame": tpf,
+                        "frames": 16,
+                        "calls": 2,
+                        "frames_per_call": 8,
+                        "tokens_per_call": 20269,
+                        "tokens_per_frame": 2533.625,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        files.append(path)
+    result = recalibrate(files)
+    assert result["a"] == pytest.approx(3997)
+    assert result["b"] == pytest.approx(2034)
+    assert result["c"] == 200
+    toml_text = format_recalibrate_toml(result)
+    assert "[claude]" in toml_text
+    assert "a = 3997" in toml_text
+
+
+def test_recalibrate_multi_batch_fits_slope(tmp_path: Path) -> None:
+    """Two batch sizes: OLS so a is intercept and b is slope (no double-count)."""
+    # tpc = 4000 + 2000 * fpc
+    samples = ((4, 12000), (8, 20000), (8, 20000))
+    files: list[Path] = []
+    for i, (fpc, tpc) in enumerate(samples):
+        path = tmp_path / f"cost-{i}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "lane_actual": {
+                        "lane": "claude",
+                        "frames": int(fpc),
+                        "calls": 1,
+                        "frames_per_call": fpc,
                         "tokens_per_call": tpc,
                     }
                 }
@@ -228,24 +315,87 @@ def test_recalibrate_medians(tmp_path: Path) -> None:
         )
         files.append(path)
     result = recalibrate(files)
-    assert result["a"] == 200
-    assert result["b"] == 20
-    assert result["c"] == 200
-    toml_text = format_recalibrate_toml(result)
-    assert "[claude]" in toml_text
-    assert "a = 200" in toml_text
-    assert "b = 20" in toml_text
+    assert result["a"] == pytest.approx(4000)
+    assert result["b"] == pytest.approx(2000)
+
+
+def test_codex_coefficients_are_measured_astra() -> None:
+    codex = _coeffs()["codex"]
+    assert codex["a"] == 4000
+    assert codex["b"] == 9582
+    assert codex["primary"] == pytest.approx(0.147)
+
+
+def test_packaged_lanes_toml_loads() -> None:
+    coeffs = load_coefficients()
+    assert "claude" in coeffs and "gemini" in coeffs and "codex" in coeffs
+    assert coeffs["claude"]["a"] == 3997
 
 
 def test_cli_flags_empty() -> None:
     assert choose_mod.cli_flags() == []
 
 
-def test_preflight_checks_only_for_auto(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_preflight_module_registered() -> None:
+    assert "frameweave.vision.choose" in MODULES
+
+
+def test_preflight_checks_only_for_auto(tmp_path: Path) -> None:
     assert preflight_checks(_cfg(vision_lane="claude")) == []
     missing = tmp_path / "missing-snapshot.json"
-    monkeypatch.setattr(choose_mod, "DEFAULT_SNAPSHOT_PATH", missing)
-    rows = preflight_checks(_cfg(vision_lane="auto"))
+    rows = preflight_checks(
+        _cfg(vision_lane="auto", usage_snapshot=missing, usage_refresh_script=tmp_path / "x.sh")
+    )
     assert len(rows) == 1
     assert rows[0].required is False
     assert rows[0].ok is False
+
+
+def test_preflight_stale_snapshot_warns(tmp_path: Path) -> None:
+    path = tmp_path / "old-snap.json"
+    old = (datetime.now(UTC) - timedelta(seconds=700)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    path.write_text(
+        json.dumps(
+            {
+                "generatedAt": old,
+                "providers": {"claude": {"metrics": [{"id": "five_hour", "percentUsed": 1}]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = preflight_checks(
+        _cfg(vision_lane="auto", usage_snapshot=path, usage_refresh_script=tmp_path / "x.sh")
+    )
+    assert len(rows) == 1
+    assert rows[0].ok is False
+    assert ">600s" in rows[0].detail
+
+
+def test_lane_actual_quota_delta_uses_chooser_before() -> None:
+    before = Snapshot(
+        generated_at=NOW,
+        metrics={"claude": {"five_hour": 10.0, "seven_day": 20.0}},
+    )
+    after = Snapshot(
+        generated_at=NOW,
+        metrics={"claude": {"five_hour": 12.0, "seven_day": 20.5}},
+    )
+    actual = lane_actual_from_run(
+        lane="claude",
+        frames=16,
+        calls=2,
+        tokens=42538,
+        before=before,
+        after=after,
+    )
+    assert actual["quota_delta"]["five_hour"] == pytest.approx(2.0)
+    assert actual["quota_delta"]["seven_day"] == pytest.approx(0.5)
+    assert actual["frames_per_call"] == pytest.approx(8.0)
+
+
+def test_config_usage_paths_threaded(tmp_path: Path) -> None:
+    snap = tmp_path / "custom-snap.json"
+    script = tmp_path / "custom-refresh.sh"
+    cfg = _cfg(usage_snapshot=snap, usage_refresh_script=script)
+    assert cfg.usage_snapshot == snap
+    assert cfg.usage_refresh_script == script
