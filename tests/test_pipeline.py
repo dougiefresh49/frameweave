@@ -406,6 +406,145 @@ def test_speakers_unavailable_before_stage_1(
     assert source.fetch_calls == 0
 
 
+def test_pipeline_two_chunk_stt_presentation_keeps_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 5: two-chunk STT path yields presentation spans; no drop at boundary."""
+    from dataclasses import dataclass, field
+
+    from frameweave.stt.audio import Chunk
+    from frameweave.stt.base import (
+        SttResult,
+        clamp_to_words,
+        merge_chunks,
+        merge_into_presentation,
+    )
+    from frameweave.types import Usage
+
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path, vision_lane="none")
+
+    def fake_chunk(audio: Path, dest_dir: Path, **kwargs: object) -> list[Chunk]:
+        del kwargs
+        return [
+            Chunk(audio, offset_s=0.0, duration_s=10.0),
+            Chunk(audio, offset_s=8.0, duration_s=12.0),
+        ]
+
+    monkeypatch.setattr("frameweave.pipeline.stt_audio.chunk", fake_chunk)
+
+    @dataclass
+    class TwoChunkFake:
+        name: str = "stt-fake"
+        calls: int = 0
+        paths: list[Path] = field(default_factory=list)
+
+        def transcribe(self, audio: Path, config: object) -> SttResult:
+            del config
+            self.paths.append(Path(audio))
+            self.calls += 1
+            if self.calls == 1:
+                segs = [
+                    Segment(float(i * 4), float(i * 4 + 4), "keep going", self.name)
+                    for i in range(2)
+                ] + [Segment(8.0, 9.5, "end of chunk one.", self.name)]
+            else:
+                segs = [
+                    Segment(0.5, 1.0, "overlap dup", self.name),
+                    Segment(1.5, 5.5, "kept after boundary", self.name),
+                    Segment(5.5, 9.5, "more kept text", self.name),
+                    Segment(9.5, 13.5, "still going", self.name),
+                    Segment(13.5, 17.5, "Second chunk close.", self.name),
+                ]
+            return SttResult(
+                segments=segs,
+                source=self.name,
+                usage=Usage(calls=1, seconds=0.01),
+                audio_seconds=12.0,
+            )
+
+        def merge_and_diarize(
+            self, audio: Path, chunk_results: list[tuple[Chunk, SttResult]]
+        ) -> list[Segment]:
+            del audio
+            return merge_into_presentation(clamp_to_words(merge_chunks(chunk_results)))
+
+    source = FakeSource(video=video)
+    stt = TwoChunkFake()
+    outcome = run(str(video), cfg, source=source, stt=stt, vision=FakeVision())
+    assert stt.calls == 2
+
+    transcript = json.loads(
+        next((cfg.cache_dir / "runs").rglob("transcript.json")).read_text(encoding="utf-8")
+    )
+    texts = " ".join(item["text"] for item in transcript["segments"])
+    assert "kept after boundary" in texts
+    assert "Second chunk close." in texts
+    assert "overlap dup" not in texts
+    assert transcript["segments"], "expected presentation spans"
+    # Presentation merge of ~17 s of unique speech → one span under 40 s.
+    for item in transcript["segments"]:
+        assert item["end"] - item["start"] <= 40.0
+    assert (outcome.output_path / "transcript.fwv").is_file()
+
+
+def test_pipeline_speakers_labels_via_merge_and_diarize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 5: --speakers on the pipeline path produces S1/S2 with a fake diarizer."""
+    from dataclasses import replace
+
+    from frameweave.stt.audio import Chunk
+    from frameweave.stt.base import SttResult
+    from frameweave.stt.local import WhisperXBackend
+    from frameweave.types import Usage
+
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path, speakers=True, vision_lane="none")
+
+    def fake_diarize(audio: Path, segments: list[Segment]) -> list[Segment]:
+        del audio
+        return [
+            replace(seg, speaker="S1" if seg.start < 8.0 else "S2") for seg in segments
+        ]
+
+    backend = WhisperXBackend(diarize=fake_diarize)
+    scripted = [
+        Segment(0.0, 4.0, "speaker one talking now", "stt-whisperx"),
+        Segment(4.0, 8.0, "still speaker one here.", "stt-whisperx"),
+        Segment(8.0, 12.0, "speaker two takes over", "stt-whisperx"),
+        Segment(12.0, 16.0, "and finishes the thought.", "stt-whisperx"),
+    ]
+
+    def fake_transcribe(self: WhisperXBackend, audio: Path, config: object) -> SttResult:
+        del self, config
+        return SttResult(
+            segments=list(scripted),
+            source="stt-whisperx",
+            usage=Usage(calls=1, seconds=0.01),
+            audio_seconds=20.0,
+        )
+
+    monkeypatch.setattr(WhisperXBackend, "transcribe", fake_transcribe)
+
+    # Avoid real chunking variance: one chunk covering the clip.
+    def fake_chunk(audio: Path, dest_dir: Path, **kwargs: object) -> list[Chunk]:
+        del dest_dir, kwargs
+        return [Chunk(audio, offset_s=0.0, duration_s=20.0)]
+
+    monkeypatch.setattr("frameweave.pipeline.stt_audio.chunk", fake_chunk)
+
+    source = FakeSource(video=video)
+    outcome = run(str(video), cfg, source=source, stt=backend, vision=FakeVision())
+    transcript = json.loads(
+        next((cfg.cache_dir / "runs").rglob("transcript.json")).read_text(encoding="utf-8")
+    )
+    speakers = {item.get("speaker") for item in transcript["segments"]}
+    assert speakers == {"S1", "S2"}
+    fwv = (outcome.output_path / "transcript.fwv").read_text(encoding="utf-8")
+    assert "S1:" in fwv
+    assert "S2:" in fwv
+
 def test_ledger_persists_before_descriptions_on_failure(tmp_path: Path) -> None:
     video = _video(tmp_path)
     cfg = _cfg(tmp_path, frames_per_call=1, frame_interval_s=2.0)
