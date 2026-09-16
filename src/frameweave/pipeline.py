@@ -105,6 +105,7 @@ class RunContext:
     output_path: Path | None = None
     completion: str = "complete"
     cost_usd: float = 0.0
+    out_override: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -157,18 +158,22 @@ def run(
     source: Source | None = None,
     stt: SttBackend | None = None,
     vision: VisionBackend | None = None,
+    out_override: Path | None = None,
+    resolved: Resolved | None = None,
 ) -> RunOutcome:
     """Execute the stage registry and return the assembled output path."""
     progress_fn = progress or _progress_noop
     redo_set = _cascade_redo(set(redo))
     config = _with_resolved_lane(config)
-    # Fail before any stage spends quota when the output root is missing.
-    require_out(config)
+    # Fail before any stage spends quota when the output root is missing,
+    # unless --out gave an exact folder (out_override).
+    if out_override is None:
+        require_out(config)
     stt = _prepare_stt(config, stt)
     reconcile(config.cache_dir)
 
     picked = source or _pick_source(raw_input)
-    resolved = picked.resolve(raw_input)
+    resolved = resolved if resolved is not None else picked.resolve(raw_input)
     source_dir = Path(config.cache_dir) / "sources" / resolved.video_id
     source_dir.mkdir(parents=True, exist_ok=True)
     key = make_run_key(config, "full")
@@ -191,6 +196,7 @@ def run(
         frames_only=frames_only,
         stt=stt,
         vision=vision,
+        out_override=out_override,
     )
 
     _install_handlers(ctx)
@@ -355,7 +361,10 @@ def _dependency_digests(
     if stage.name == "transcript":
         digests["settings"] = _transcript_settings_digest(ctx.config)
     if stage.name == "assemble":
-        digests["out"] = str(require_out(ctx.config).resolve())
+        if ctx.out_override is not None:
+            digests["out"] = str(ctx.out_override.resolve())
+        else:
+            digests["out"] = str(require_out(ctx.config).resolve())
     return digests
 
 
@@ -656,12 +665,20 @@ def _stage_describe(ctx: RunContext) -> StageResult:
 def _stage_assemble(ctx: RunContext) -> StageResult:
     assert ctx.resolved is not None
     marker = ctx.run_dir / "assembled.json"
-    root = require_out(ctx.config)
-    out = output_dir(
-        root,
-        channel_slug(ctx.resolved.channel, ctx.config, root),
-        slugify(ctx.resolved.title),
-    )
+    if ctx.out_override is not None:
+        out = output_dir(
+            Path("."),
+            "",
+            "",
+            out_override=ctx.out_override,
+        )
+    else:
+        root = require_out(ctx.config)
+        out = output_dir(
+            root,
+            channel_slug(ctx.resolved.channel, ctx.config, root),
+            slugify(ctx.resolved.title),
+        )
     out.mkdir(parents=True, exist_ok=True)
 
     transcript = _load_transcript(ctx.run_dir / "transcript.json")
