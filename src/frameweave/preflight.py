@@ -30,6 +30,7 @@ MODULES: list[str] = [
     "frameweave.sources.http",
     "frameweave.captions",
     "frameweave.stt.local",
+    "frameweave.stt.speakers",
     "frameweave.frames",
     "frameweave.vision.base",
     "frameweave.format.readme",
