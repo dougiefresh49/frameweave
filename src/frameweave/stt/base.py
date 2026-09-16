@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -12,6 +13,8 @@ from .audio import Chunk
 
 if TYPE_CHECKING:
     from frameweave.config import Config
+
+_SENTENCE_END = re.compile(r"[.!?][\"']?$")
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,77 @@ def clamp_to_words(segments: list[Segment]) -> list[Segment]:
             start, end = first.start, min(first.end, first.start + 0.9)
         clamped.append(replace(segment, start=start, end=end))
     return clamped
+
+
+def merge_into_presentation(
+    segments: list[Segment],
+    min_s: float = 20.0,
+    max_s: float = 40.0,
+) -> list[Segment]:
+    """Merge short STT segments into 20–40 s presentation spans at sentence ends.
+
+    Never splits a segment. A speaker change closes the current group when either
+    side has a speaker label. Words concatenate; quality is the mean of present
+    values; source is unchanged; ids are renumbered ``s0001``…
+    """
+    if not segments:
+        return []
+
+    groups: list[list[Segment]] = []
+    current: list[Segment] = []
+
+    def span_of(group: list[Segment]) -> float:
+        return group[-1].end - group[0].start
+
+    def flush() -> None:
+        nonlocal current
+        if current:
+            groups.append(current)
+            current = []
+
+    for segment in segments:
+        if current and _speaker_change(current[0].speaker, segment.speaker):
+            flush()
+
+        if current and span_of(current) >= min_s:
+            proposed = segment.end - current[0].start
+            if proposed > max_s:
+                flush()
+
+        current.append(segment)
+        if span_of(current) >= min_s and _SENTENCE_END.search(segment.text.rstrip()):
+            flush()
+
+    flush()
+    return [_combine(group, index) for index, group in enumerate(groups, 1)]
+
+
+def _speaker_change(current: str | None, incoming: str | None) -> bool:
+    if current is None and incoming is None:
+        return False
+    return current != incoming
+
+
+def _combine(group: list[Segment], index: int) -> Segment:
+    words: list[Word] = []
+    has_words = False
+    qualities: list[float] = []
+    for segment in group:
+        if segment.words is not None:
+            has_words = True
+            words.extend(segment.words)
+        if segment.quality is not None:
+            qualities.append(segment.quality)
+    return Segment(
+        id=f"s{index:04d}",
+        start=group[0].start,
+        end=group[-1].end,
+        text=" ".join(segment.text for segment in group if segment.text).strip(),
+        source=group[0].source,
+        speaker=group[0].speaker,
+        words=words if has_words else None,
+        quality=(sum(qualities) / len(qualities)) if qualities else None,
+    )
 
 
 def _rebase(segment: Segment, offset: float) -> Segment:

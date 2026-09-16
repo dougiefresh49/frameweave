@@ -6,9 +6,11 @@ FakeBackend is kept for issue #14 pipeline tests (see tests/fakes/stt.py).
 from __future__ import annotations
 
 import gc
+import logging
 import os
 import shutil
 import subprocess
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -16,12 +18,20 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from frameweave.frames import plan
 from frameweave.stt.audio import Chunk, extract
-from frameweave.stt.base import SttResult, SttTimeout, clamp_to_words, merge_chunks
+from frameweave.stt.base import (
+    SttResult,
+    SttTimeout,
+    clamp_to_words,
+    merge_chunks,
+    merge_into_presentation,
+)
 from frameweave.stt.local import (
     WhisperXBackend,
     _faster_whisper_hub_dirname,
     _model_present,
+    _quiet_third_party,
     _segments,
     is_silent,
 )
@@ -38,8 +48,24 @@ def _result(*segments: Segment, audio_seconds: float = 10) -> SttResult:
     )
 
 
-def _segment(start: float, end: float, text: str, *, words: list[Word] | None = None) -> Segment:
-    return Segment(start=start, end=end, text=text, source="stt-whisperx", words=words)
+def _segment(
+    start: float,
+    end: float,
+    text: str,
+    *,
+    words: list[Word] | None = None,
+    speaker: str | None = None,
+    quality: float | None = None,
+) -> Segment:
+    return Segment(
+        start=start,
+        end=end,
+        text=text,
+        source="stt-whisperx",
+        words=words,
+        speaker=speaker,
+        quality=quality,
+    )
 
 
 def test_fake_backend_returns_scripted_result(tmp_path: Path) -> None:
@@ -95,6 +121,83 @@ def test_clamp_to_words_caps_stretched_edge_word_at_point_nine_seconds() -> None
 def test_clamp_without_words_leaves_segment_bounds_unchanged() -> None:
     segment = _segment(2, 5, "unaligned")
     assert clamp_to_words([segment]) == [segment]
+
+
+def test_merge_into_presentation_four_minute_script_is_six_to_twelve_spans() -> None:
+    """#54: 60 × 4 s segments → 6–12 presentation spans of 20–40 s (last may be short)."""
+    raw: list[Segment] = []
+    for index in range(60):
+        start = index * 4.0
+        # Sentence end every 7th segment so cuts land inside the 20–40 s window.
+        text = "Done." if (index + 1) % 7 == 0 else "keep going"
+        words = [
+            Word(start, start + 1.5, "keep", 0.9),
+            Word(start + 1.5, start + 4.0, "going" if "keep" in text else "Done.", 0.8),
+        ]
+        raw.append(
+            _segment(start, start + 4.0, text, words=words, quality=-0.2 - (index % 3) * 0.1)
+        )
+
+    merged = merge_into_presentation(raw)
+
+    assert 6 <= len(merged) <= 12
+    assert [segment.id for segment in merged] == [f"s{i:04d}" for i in range(1, len(merged) + 1)]
+    for segment in merged[:-1]:
+        span = segment.end - segment.start
+        assert 20.0 <= span <= 40.0
+        assert segment.text.rstrip().endswith((".", "?", "!"))
+    assert merged[-1].end - merged[-1].start <= 40.0
+    assert all(segment.source == "stt-whisperx" for segment in merged)
+
+    all_words = [word for segment in merged for word in segment.words or []]
+    assert len(all_words) == sum(len(segment.words or []) for segment in raw)
+    assert all(segment.quality is not None for segment in merged)
+
+    planned = plan(
+        merged,
+        240.0,
+        SimpleNamespace(frame_interval_s=45.0, max_frames=None, frame_width=1280, timeout_s=120.0),
+    )
+    primaries = [frame for frame in planned.frames if frame.kind == "primary"]
+    # About one primary per 30 s of speech (240 / 30 ≈ 8).
+    assert 6 <= len(primaries) <= 12
+
+
+def test_merge_into_presentation_respects_speaker_boundaries() -> None:
+    # 6 × 4 s of S1 then 6 × 4 s of S2; sentence end on each speaker's last unit.
+    raw: list[Segment] = []
+    for index in range(12):
+        start = index * 4.0
+        speaker = "S1" if index < 6 else "S2"
+        text = "Sentence end." if (index + 1) % 6 == 0 else "keep going"
+        raw.append(
+            _segment(
+                start,
+                start + 4.0,
+                text,
+                speaker=speaker,
+                words=[Word(start, start + 4.0, "w", 0.9)],
+            )
+        )
+
+    merged = merge_into_presentation(raw)
+
+    assert len(merged) == 2
+    assert [segment.speaker for segment in merged] == ["S1", "S2"]
+    assert merged[0].end == 24.0
+    assert merged[1].start == 24.0
+    assert len(merged[0].words or []) == 6
+    assert len(merged[1].words or []) == 6
+
+
+def test_merge_into_presentation_closes_at_max_without_sentence_end() -> None:
+    raw = [
+        _segment(i * 4.0, i * 4.0 + 4.0, "no stop yet")
+        for i in range(12)  # 48 s with no sentence ends
+    ]
+    merged = merge_into_presentation(raw)
+    assert all(segment.end - segment.start <= 40.0 for segment in merged)
+    assert len(merged) >= 2
 
 
 def test_is_silent_recognizes_empty_result() -> None:
@@ -161,6 +264,68 @@ def test_load_model_uses_whisperx_default_vad(
     assert "vad_method" not in captured["kwargs"]
 
 
+def test_transcribe_quiets_third_party_warnings_and_restores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#55: filters and logger levels are installed around load/transcribe, then restored."""
+    audio = tmp_path / "chunk.wav"
+    audio.write_bytes(b"")
+    inside: dict[str, Any] = {}
+
+    whisperx_logger = logging.getLogger("whisperx")
+    torch_logger = logging.getLogger("torch")
+    pyannote_logger = logging.getLogger("pyannote")
+    before_levels = {
+        "whisperx": whisperx_logger.level,
+        "torch": torch_logger.level,
+        "pyannote": pyannote_logger.level,
+    }
+    before_filters = warnings.filters[:]
+
+    def fake_load_model(*args: Any, **kwargs: Any) -> MagicMock:
+        inside["whisperx_level"] = logging.getLogger("whisperx").level
+        inside["torch_level"] = logging.getLogger("torch").level
+        inside["pyannote_level"] = logging.getLogger("pyannote").level
+        inside["filters"] = warnings.filters[:]
+        model = MagicMock()
+        model.transcribe.return_value = {"segments": [], "language": "en"}
+        return model
+
+    fake_whisperx = SimpleNamespace(
+        load_model=fake_load_model,
+        load_audio=lambda path: [],
+    )
+    monkeypatch.setitem(__import__("sys").modules, "whisperx", fake_whisperx)
+    monkeypatch.setattr("frameweave.stt.local.duration", lambda path, timeout_s=120.0: 1.0)
+
+    WhisperXBackend().transcribe(audio, _config())
+
+    assert inside["whisperx_level"] == logging.ERROR
+    assert inside["torch_level"] == logging.ERROR
+    assert inside["pyannote_level"] == logging.ERROR
+    assert any(
+        len(item) >= 4 and item[3] is not None and "whisperx" in str(item[3].pattern)
+        for item in inside["filters"]
+        if isinstance(item, tuple)
+    )
+    assert logging.getLogger("whisperx").level == before_levels["whisperx"]
+    assert logging.getLogger("torch").level == before_levels["torch"]
+    assert logging.getLogger("pyannote").level == before_levels["pyannote"]
+    assert warnings.filters == before_filters
+
+
+def test_quiet_third_party_context_restores_outside() -> None:
+    logger = logging.getLogger("lightning")
+    previous = logger.level
+    logger.setLevel(logging.DEBUG)
+    try:
+        with _quiet_third_party():
+            assert logger.level == logging.ERROR
+        assert logger.level == logging.DEBUG
+    finally:
+        logger.setLevel(previous)
+
+
 def test_model_present_requires_exact_faster_whisper_hub_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -212,7 +377,7 @@ def _config() -> SimpleNamespace:
 @pytest.mark.slow
 @pytest.mark.skipif(not _slow_tests_enabled(), reason="set FRAMEWEAVE_SLOW_TESTS=1")
 def test_real_model_transcribes_synthetic_speech_offline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
@@ -231,6 +396,10 @@ def test_real_model_transcribes_synthetic_speech_offline(
     assert all(segment.source == "stt-whisperx" for segment in result.segments)
     assert result.audio_seconds > 0
     assert result.usage.usd == 0
+    captured = capsys.readouterr()
+    noisy = ("UserWarning", "FutureWarning", "INFO:", "libavutil", "lightning", "torchcodec")
+    combined = captured.out + captured.err
+    assert not any(token in combined for token in noisy), combined
     del backend
     gc.collect()
 
