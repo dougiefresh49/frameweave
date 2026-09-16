@@ -808,3 +808,43 @@ def test_auto_run_writes_lane_choice_and_lane_actual(tmp_path: Path) -> None:
     assert "tokens_per_frame" in cost["lane_actual"]
     # Chooser before-reading is present, so quota_delta is populated (not {}).
     assert "five_hour" in cost["lane_actual"]["quota_delta"]
+
+
+def test_local_file_captions_are_note_not_warning(tmp_path: Path) -> None:
+    """Non-YouTube sources: no caption tracks is a stats note, not a warning."""
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path)
+    outcome = run(
+        str(video),
+        cfg,
+        source=FakeSource(video=video, name="local"),
+        stt=FakeStt(),
+        vision=FakeVision(),
+    )
+    assert outcome.completion == "complete"
+    assert not any("caption" in w.lower() for w in outcome.warnings)
+    meta = json.loads((outcome.output_path / "meta.json").read_text(encoding="utf-8"))
+    assert meta["completion"] == "complete"
+    assert meta["warnings"] == []
+    assert meta["stats"]["captions"] == "not applicable (local file)"
+    captions = json.loads(
+        next((cfg.cache_dir / "sources").rglob("captions.json")).read_text(encoding="utf-8")
+    )
+    assert captions["reason"] == "not applicable (local file)"
+
+
+def test_direct_url_captions_are_note_not_warning(tmp_path: Path) -> None:
+    """Direct URL sources: no caption tracks is a stats note, not a warning."""
+    video = _video(tmp_path)
+    cfg = _cfg(tmp_path)
+    outcome = run(
+        str(video),
+        cfg,
+        source=FakeSource(video=video, name="http"),
+        stt=FakeStt(),
+        vision=FakeVision(),
+    )
+    assert outcome.completion == "complete"
+    meta = json.loads((outcome.output_path / "meta.json").read_text(encoding="utf-8"))
+    assert meta["stats"]["captions"] == "not applicable (direct URL)"
+    assert meta["warnings"] == []

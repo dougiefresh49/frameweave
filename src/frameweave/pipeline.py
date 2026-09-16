@@ -607,8 +607,15 @@ def _stage_fetch_captions(ctx: RunContext) -> StageResult:
             warnings=[result.reason] if result.reason else [],
         )
 
-    # Non-YouTube: never fail the run; record a none reason.
-    reason = "source has no caption tracks; speech falls through to STT"
+    # Non-YouTube: never fail the run. Local files and direct URLs have no
+    # caption tracks by nature — record a note for meta.stats, not a warning,
+    # so a recording with speech stays ``complete`` rather than
+    # ``complete-with-warnings``.
+    source_name = getattr(ctx.source, "name", "") or ""
+    if source_name == "http":
+        reason = "not applicable (direct URL)"
+    else:
+        reason = "not applicable (local file)"
     _atomic_json(
         path,
         {"segments": [], "source": "none", "track": None, "reason": reason},
@@ -617,7 +624,7 @@ def _stage_fetch_captions(ctx: RunContext) -> StageResult:
         stage="fetch_captions",
         status="done",
         artifact=str(path),
-        warnings=[reason],
+        warnings=[],
     )
 
 
@@ -927,13 +934,7 @@ def _stage_assemble(ctx: RunContext) -> StageResult:
         completion=completion,
         completion_reason=reason,
         warnings=list(ctx.warnings),
-        stats={
-            "segments": len(segments),
-            "windows": 0,
-            "frames_primary": primary,
-            "frames_extra": extra,
-            "dropped_duplicates": 0,
-        },
+        stats=_assemble_stats(segments, primary, extra, captions),
         generated_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         tool_version=__version__,
         caption_track=captions.track,
@@ -1012,6 +1013,26 @@ STAGES: list[Stage] = [
 
 
 # --- helpers ---
+
+
+def _assemble_stats(
+    segments: list[Segment],
+    primary: int,
+    extra: int,
+    captions: CaptionsResult,
+) -> dict[str, Any]:
+    """Build ``meta.json`` stats; non-YouTube caption notes land here, not in warnings."""
+    stats: dict[str, Any] = {
+        "segments": len(segments),
+        "windows": 0,
+        "frames_primary": primary,
+        "frames_extra": extra,
+        "dropped_duplicates": 0,
+    }
+    reason = captions.reason
+    if isinstance(reason, str) and reason.startswith("not applicable"):
+        stats["captions"] = reason
+    return stats
 
 
 def _default_stt(config: Config) -> SttBackend:
