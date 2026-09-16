@@ -552,3 +552,35 @@ def test_chapter_semicolon_kept_on_heading_flattened_in_header(tmp_path: Path) -
     assert "chapters: 00:00:00 Intro, setup; 00:01:00 Part A, Part B" in header
     assert "## [00:00:00] Intro; setup" in text
     assert "## [00:01:00] Part A; Part B" in text
+
+
+def test_header_chapters_lists_all_while_body_uses_window(tmp_path: Path) -> None:
+    """Issue #58: ``header_chapters`` owns the header list; body uses resolved chapters."""
+    all_chapters = [
+        Chapter(0.0, "Intro"),
+        Chapter(60.0, "Middle"),
+        Chapter(120.0, "Outro"),
+    ]
+    resolved = Resolved(
+        video_id="v",
+        title="t",
+        channel="c",
+        source="/v.mp4",
+        duration=180.0,
+        chapters=[Chapter(60.0, "Middle")],
+    )
+    segments = [Segment(60.0, 65.0, "hello", "captions")]
+    text = write_transcript(
+        tmp_path,
+        resolved,
+        segments,
+        [],
+        [],
+        _meta(range_spec="chapter: Middle"),
+        header_chapters=all_chapters,
+    ).read_text(encoding="utf-8")
+    header = text.split("\n\n", 1)[0]
+    assert "chapters: 00:00:00 Intro; 00:01:00 Middle; 00:02:00 Outro" in header
+    assert "## [00:01:00] Middle" in text
+    assert "## [00:00:00] Intro" not in text
+    assert "## [00:02:00] Outro" not in text

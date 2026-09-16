@@ -24,6 +24,7 @@ from typing import Any
 from frameweave.types import (
     FORMAT_VERSION,
     TRANSCRIPT_NAME,
+    Chapter,
     Description,
     Frame,
     Resolved,
@@ -104,11 +105,14 @@ def write_transcript(
     meta: RunMeta,
     extra_events: list[str] | None = None,
     extra_headers: dict[str, str] | None = None,
+    header_chapters: list[Chapter] | None = None,
 ) -> Path:
     """Write ``<dest_dir>/transcript.fwv`` and return its path.
 
     ``extra_events`` are raw body lines (a ``note/dedupe`` line, later #22) inserted
     in time order. ``extra_headers`` are appended after the documented header keys.
+    ``header_chapters`` when set is the ``chapters:`` header list (whole video);
+    ``##`` headings still come from ``resolved.chapters`` (often windowed).
     A frame with no description renders summary ``(no description)``, an empty
     ``text:`` line, and appends a warning on ``meta``.
 
@@ -128,7 +132,9 @@ def write_transcript(
         segments, meta.warnings, speech_requested
     )
 
-    header = _header_lines(resolved, frames, meta, extra_headers or {})
+    header = _header_lines(
+        resolved, frames, meta, extra_headers or {}, header_chapters
+    )
     body = _body_lines(
         resolved,
         segments,
@@ -214,6 +220,7 @@ def _header_lines(
     frames: list[Frame],
     meta: RunMeta,
     extra_headers: dict[str, str],
+    header_chapters: list[Chapter] | None = None,
 ) -> list[str]:
     primary = sum(1 for f in frames if f.kind == "primary")
     extra = sum(1 for f in frames if f.kind == "extra")
@@ -239,9 +246,10 @@ def _header_lines(
             f"generated: {meta.generated_at} frameweave {meta.tool_version}",
         ]
     )
-    if resolved.chapters:
+    chapters = header_chapters if header_chapters is not None else resolved.chapters
+    if chapters:
         rendered = "; ".join(
-            f"{_clock(ch.start)} {_chapter_header_title(ch.title)}" for ch in resolved.chapters
+            f"{_clock(ch.start)} {_chapter_header_title(ch.title)}" for ch in chapters
         )
         lines.append(f"chapters: {rendered}")
     for key, value in extra_headers.items():
