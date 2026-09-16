@@ -107,7 +107,7 @@ def _timeout_message(timeout_s: float, frames_per_call: int) -> str:
     frames_shown = _fmt_number(frames_per_call)
     return (
         f"--timeout <seconds> (raise the per-call timeout, currently {timeout_shown})\n"
-        "--vision-quality low (send smaller frames)\n"
+        "--vision-quality standard (send smaller frames)\n"
         f"--frames-per-call <n> (send fewer frames per request, currently {frames_shown})"
     )
 

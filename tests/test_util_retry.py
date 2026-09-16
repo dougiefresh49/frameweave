@@ -95,7 +95,7 @@ def test_timeout_message_names_flags_and_current_values(fake_clock, fixed_rand) 
     assert "currently 4" in message
     assert message == (
         "--timeout <seconds> (raise the per-call timeout, currently 45)\n"
-        "--vision-quality low (send smaller frames)\n"
+        "--vision-quality standard (send smaller frames)\n"
         "--frames-per-call <n> (send fewer frames per request, currently 4)"
     )
     assert fake_clock.sleeps == []
