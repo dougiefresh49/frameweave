@@ -37,6 +37,8 @@ from frameweave.config import (
 from frameweave.config import (
     run_key as make_run_key,
 )
+from frameweave.dedupe import pillow_available
+from frameweave.dedupe import suppress as suppress_duplicates
 from frameweave.format.readme import write_readme
 from frameweave.format.writer import (
     RunMeta,
@@ -446,6 +448,8 @@ def _dependency_digests(
         digests[dep_name] = _sha256_file(path) if path.is_file() else ""
     if stage.name == "transcript":
         digests["settings"] = _transcript_settings_digest(ctx.config, ctx.range_spec)
+    if stage.name == "dedupe":
+        digests["settings"] = "keep" if ctx.config.keep_duplicates else "drop"
     if stage.name == "assemble":
         if ctx.out_override is not None:
             digests["out"] = str(ctx.out_override.resolve())
@@ -756,6 +760,80 @@ def _stage_frames(ctx: RunContext) -> StageResult:
     return StageResult(stage="frames", status="done", artifact=str(path))
 
 
+def _stage_dedupe(ctx: RunContext) -> StageResult:
+    """Mark near-duplicate frames in frames.json; describe reads only kept ones."""
+    frames_path = ctx.run_dir / "frames.json"
+    artifact = ctx.run_dir / "dedupe.json"
+    data = json.loads(frames_path.read_text(encoding="utf-8"))
+    raw_frames = list(data.get("frames") or [])
+    frames = [Frame.from_dict(item) for item in raw_frames]
+    total = len(frames)
+
+    if not pillow_available():
+        _atomic_json(
+            artifact,
+            {
+                "stats": f"{total} of {total} kept",
+                "frames_kept": total,
+                "frames_dropped": 0,
+                "dropped": [],
+                "extra_events": [],
+                "skipped": "pillow not installed",
+            },
+        )
+        return StageResult(
+            stage="dedupe",
+            status="done",
+            artifact=str(artifact),
+            warnings=["dedupe skipped: pillow not installed"],
+        )
+
+    result = suppress_duplicates(
+        frames,
+        ctx.run_dir / "frames",
+        keep_duplicates=ctx.config.keep_duplicates,
+    )
+    dropped_by_id = {item.frame.id: item for item in result.dropped}
+    rewritten: list[dict[str, Any]] = []
+    for item in raw_frames:
+        entry = {k: v for k, v in item.items() if k not in {"dropped", "near", "distance"}}
+        dropped = dropped_by_id.get(str(entry.get("id")))
+        if dropped is not None:
+            entry["dropped"] = "near-duplicate"
+            entry["near"] = dropped.near
+            entry["distance"] = dropped.distance
+        rewritten.append(entry)
+    data["frames"] = rewritten
+    _atomic_json(frames_path, data)
+
+    extra_events = [
+        (
+            f"[{_dedupe_clock(item.frame.time)}] note/dedupe: frame {item.frame.id} "
+            f"dropped; near-duplicate of {item.near}"
+        )
+        for item in result.dropped
+    ]
+    _atomic_json(
+        artifact,
+        {
+            "stats": result.stats,
+            "frames_kept": len(result.kept),
+            "frames_dropped": len(result.dropped),
+            "dropped": [
+                {
+                    "id": item.frame.id,
+                    "time": item.frame.time,
+                    "near": item.near,
+                    "distance": item.distance,
+                }
+                for item in result.dropped
+            ],
+            "extra_events": extra_events,
+        },
+    )
+    return StageResult(stage="dedupe", status="done", artifact=str(artifact))
+
+
 def _stage_describe(ctx: RunContext) -> StageResult:
     assert ctx.resolved is not None
     path = ctx.run_dir / "descriptions.json"
@@ -925,6 +1003,7 @@ def _stage_assemble(ctx: RunContext) -> StageResult:
 
     primary = sum(1 for f in frames if f.kind == "primary")
     extra = sum(1 for f in frames if f.kind == "extra")
+    kept_n, dropped_n, kept_label, extra_events = _dedupe_assemble_fields(ctx, len(frames))
     meta = RunMeta(
         range_spec=rs.header,
         transcript_source=transcript.get("source") or "none",
@@ -934,7 +1013,7 @@ def _stage_assemble(ctx: RunContext) -> StageResult:
         completion=completion,
         completion_reason=reason,
         warnings=list(ctx.warnings),
-        stats=_assemble_stats(segments, primary, extra, captions),
+        stats=_assemble_stats(segments, primary, extra, captions, kept_n, dropped_n, kept_label),
         generated_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         tool_version=__version__,
         caption_track=captions.track,
@@ -953,6 +1032,7 @@ def _stage_assemble(ctx: RunContext) -> StageResult:
         descriptions,
         meta,
         header_chapters=ctx.resolved.chapters,
+        extra_events=extra_events,
     )
     write_meta(out, ctx.resolved, frames, meta)
     cost = ctx.ledger.summary()
@@ -995,17 +1075,18 @@ STAGES: list[Stage] = [
         True,
     ),
     Stage("frames", _stage_frames, ("transcript", "fetch_media"), "frames.json", True),
+    Stage("dedupe", _stage_dedupe, ("frames",), "dedupe.json", True),
     Stage(
         "describe",
         _stage_describe,
-        ("frames", "transcript"),
+        ("dedupe", "transcript"),
         "descriptions.json",
         True,
     ),
     Stage(
         "assemble",
         _stage_assemble,
-        ("describe", "frames", "transcript", "resolve"),
+        ("describe", "dedupe", "frames", "transcript", "resolve"),
         "assembled.json",
         True,
     ),
@@ -1020,6 +1101,9 @@ def _assemble_stats(
     primary: int,
     extra: int,
     captions: CaptionsResult,
+    frames_kept: int,
+    frames_dropped: int,
+    kept_label: str,
 ) -> dict[str, Any]:
     """Build ``meta.json`` stats; non-YouTube caption notes land here, not in warnings."""
     stats: dict[str, Any] = {
@@ -1027,12 +1111,42 @@ def _assemble_stats(
         "windows": 0,
         "frames_primary": primary,
         "frames_extra": extra,
-        "dropped_duplicates": 0,
+        "dropped_duplicates": frames_dropped,
+        "frames_kept": frames_kept,
+        "frames_dropped": frames_dropped,
+        "kept": kept_label,
     }
     reason = captions.reason
     if isinstance(reason, str) and reason.startswith("not applicable"):
         stats["captions"] = reason
     return stats
+
+
+def _dedupe_assemble_fields(
+    ctx: RunContext, kept_fallback: int
+) -> tuple[int, int, str, list[str]]:
+    """Read dedupe.json for stats and note/dedupe transcript lines."""
+    path = ctx.run_dir / "dedupe.json"
+    if not path.is_file():
+        label = f"{kept_fallback} of {kept_fallback} kept"
+        return kept_fallback, 0, label, []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        label = f"{kept_fallback} of {kept_fallback} kept"
+        return kept_fallback, 0, label, []
+    kept = int(data.get("frames_kept", kept_fallback))
+    dropped = int(data.get("frames_dropped", 0))
+    label = str(data.get("stats") or f"{kept} of {kept + dropped} kept")
+    events = [str(line) for line in data.get("extra_events") or []]
+    return kept, dropped, label, events
+
+
+def _dedupe_clock(seconds: float) -> str:
+    rendered = timecode.format(seconds, tenths=True)
+    if rendered.endswith(".0"):
+        return rendered[:-2]
+    return rendered
 
 
 def _default_stt(config: Config) -> SttBackend:
@@ -1065,9 +1179,14 @@ def _load_transcript(path: Path) -> dict[str, Any]:
     }
 
 
-def _load_frames(path: Path) -> list[Frame]:
+def _load_frames(path: Path, *, include_dropped: bool = False) -> list[Frame]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    return [Frame.from_dict(item) for item in data.get("frames") or []]
+    frames: list[Frame] = []
+    for item in data.get("frames") or []:
+        if not include_dropped and item.get("dropped"):
+            continue
+        frames.append(Frame.from_dict(item))
+    return frames
 
 
 def _load_descriptions(path: Path) -> list[Description]:

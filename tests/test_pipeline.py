@@ -692,6 +692,7 @@ def test_stage_registry_order() -> None:
         "fetch_captions",
         "transcript",
         "frames",
+        "dedupe",
         "describe",
         "assemble",
     ]
