@@ -1,0 +1,19 @@
+{
+  "_note": "Client-specific terms from voice-lab row 10, added on top of the seeded mangles.",
+  "entries": [
+    {
+      "heard": "worker cue",
+      "meant": "worker queue",
+      "context": "internal job system name for this client"
+    },
+    {
+      "heard": "shed load",
+      "meant": "shedload",
+      "context": "the client's term for dropping messages past the buffer cap"
+    }
+  ],
+  "_verdicts": {
+    "worker cue": "accepted",
+    "shed load": "accepted"
+  }
+}
