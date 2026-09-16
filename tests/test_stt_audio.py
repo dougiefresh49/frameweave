@@ -6,10 +6,11 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from frameweave.stt.audio import chunk, duration, extract
+from frameweave.stt.audio import SttError, chunk, duration, extract
 
 
 def _spoken_clip(tmp_path: Path) -> Path:
@@ -100,3 +101,23 @@ def test_short_audio_yields_one_chunk_at_zero(tmp_path: Path) -> None:
     assert chunks[0].offset_s == 0
     assert chunks[0].duration_s == pytest.approx(duration(audio))
     assert chunks[0].path == tmp_path / "work" / "chunks" / "000.wav"
+
+
+def test_ffmpeg_failure_raises_stt_error_with_stderr(tmp_path: Path) -> None:
+    with patch("frameweave.stt.audio.subprocess.run") as run:
+        run.side_effect = subprocess.CalledProcessError(
+            1,
+            ["ffmpeg"],
+            stderr="No such file or directory",
+        )
+        with pytest.raises(SttError, match="No such file or directory") as raised:
+            extract(tmp_path / "missing.mp4", tmp_path / "out")
+    assert isinstance(raised.value.__cause__, subprocess.CalledProcessError)
+
+
+def test_ffmpeg_timeout_raises_stt_error(tmp_path: Path) -> None:
+    with patch("frameweave.stt.audio.subprocess.run") as run:
+        run.side_effect = subprocess.TimeoutExpired(cmd=["ffmpeg"], timeout=0.01)
+        with pytest.raises(SttError, match="timed out after 0.01s") as raised:
+            extract(tmp_path / "clip.mp4", tmp_path / "out", timeout_s=0.01)
+    assert isinstance(raised.value.__cause__, subprocess.TimeoutExpired)

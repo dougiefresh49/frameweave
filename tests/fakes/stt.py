@@ -1,4 +1,4 @@
-"""Scripted speech backend used by STT unit tests; it never loads a model."""
+"""Scripted speech backend kept for issue #14 pipeline tests; it never loads a model."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from frameweave.stt.base import SttResult
 
 @dataclass
 class FakeBackend:
-    """Return one scripted result per call."""
+    """Return one scripted result per call. Kept for #14; merge/clamp tests use fixtures."""
 
     results: list[SttResult]
     name: str = "stt-fake"

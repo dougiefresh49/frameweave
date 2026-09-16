@@ -22,6 +22,7 @@ class SttResult:
     source: str
     usage: Usage
     audio_seconds: float
+    dropped_words: int = 0
 
 
 class SttBackend(Protocol):

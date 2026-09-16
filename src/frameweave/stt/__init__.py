@@ -1,12 +1,13 @@
 """Speech-to-text interfaces and the local WhisperX backend."""
 
-from .audio import Chunk, chunk, duration, extract
+from .audio import Chunk, SttError, chunk, duration, extract
 from .base import SttBackend, SttResult, SttTimeout, clamp_to_words, merge_chunks
 from .local import WhisperXBackend, cli_flags, is_silent, preflight_checks
 
 __all__ = [
     "Chunk",
     "SttBackend",
+    "SttError",
     "SttResult",
     "SttTimeout",
     "WhisperXBackend",

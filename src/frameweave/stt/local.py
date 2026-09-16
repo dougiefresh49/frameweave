@@ -36,30 +36,45 @@ class WhisperXBackend:
         self._align_model: Any = None
         self._align_metadata: dict[str, Any] | None = None
         self._align_key: tuple[str, str] | None = None
+        self._elapsed_s = 0.0
 
     def transcribe(self, audio: Path, config: Config) -> SttResult:
         """Transcribe one audio chunk locally and return aligned segments."""
+        limit = config.timeout_s * 20
+        if self._elapsed_s > limit:
+            raise SttTimeout(
+                f"local STT exceeded {limit:g}s before chunk {audio.name}; resume with "
+                "--stt-device cpu or transcribe fewer minutes via a range"
+            )
+
         started = time.monotonic()
-        audio_seconds = duration(audio)
+        try:
+            return self._transcribe(audio, config, started)
+        finally:
+            self._elapsed_s += time.monotonic() - started
+
+    def _transcribe(self, audio: Path, config: Config, started: float) -> SttResult:
+        audio_seconds = duration(audio, timeout_s=config.timeout_s)
         import whisperx
 
         device = config.stt_device
         compute_type = "int8" if device == "cpu" else "default"
         model_key = (config.stt_model, device, compute_type)
         if self._model is None or self._model_key != model_key:
+            # Use whisperx's default VAD (assumed: spike 3.4x realtime used the default).
             self._model = whisperx.load_model(
                 config.stt_model,
                 device,
                 compute_type=compute_type,
                 language="en",
                 threads=_CPU_THREADS,
-                vad_method="silero",
             )
             self._model_key = model_key
 
         samples = whisperx.load_audio(str(audio))
         transcription = self._model.transcribe(samples, batch_size=_BATCH_SIZE)
         raw_segments = transcription.get("segments", [])
+        dropped_words = 0
         if raw_segments:
             language = transcription.get("language", "en")
             align_key = (language, device)
@@ -79,22 +94,18 @@ class WhisperXBackend:
             )
             if config.speakers and self.diarize is not None:
                 aligned = self.diarize(aligned, samples)
-            segments = clamp_to_words(_segments(aligned.get("segments", [])))
+            segments, dropped_words = _segments(aligned.get("segments", []))
+            segments = clamp_to_words(segments)
         else:
             segments = []
 
         elapsed = time.monotonic() - started
-        limit = config.timeout_s * 20
-        if elapsed > limit:
-            raise SttTimeout(
-                f"local STT exceeded {limit:g}s after chunk {audio.name}; resume with "
-                "--stt-device cpu or transcribe fewer minutes via a range"
-            )
         return SttResult(
             segments=segments,
             source=self.name,
             usage=Usage(calls=1, seconds=elapsed, usd=0.0),
             audio_seconds=audio_seconds,
+            dropped_words=dropped_words,
         )
 
 
@@ -162,19 +173,23 @@ def preflight_checks(config: Config) -> list[Check]:
     ]
 
 
-def _segments(raw_segments: list[dict[str, Any]]) -> list[Segment]:
+def _segments(raw_segments: list[dict[str, Any]]) -> tuple[list[Segment], int]:
     segments: list[Segment] = []
+    dropped_words = 0
     for index, raw in enumerate(raw_segments, 1):
-        words = [
-            Word(
-                start=float(word["start"]),
-                end=float(word["end"]),
-                text=str(word.get("word", word.get("text", ""))),
-                score=_optional_float(word.get("score")),
+        words: list[Word] = []
+        for word in raw.get("words", []):
+            if word.get("start") is None or word.get("end") is None:
+                dropped_words += 1
+                continue
+            words.append(
+                Word(
+                    start=float(word["start"]),
+                    end=float(word["end"]),
+                    text=str(word.get("word", word.get("text", ""))),
+                    score=_optional_float(word.get("score")),
+                )
             )
-            for word in raw.get("words", [])
-            if word.get("start") is not None and word.get("end") is not None
-        ]
         segments.append(
             Segment(
                 id=f"s{index:04d}",
@@ -187,7 +202,7 @@ def _segments(raw_segments: list[dict[str, Any]]) -> list[Segment]:
                 quality=_optional_float(raw.get("avg_logprob")),
             )
         )
-    return segments
+    return segments, dropped_words
 
 
 def _optional_float(value: object) -> float | None:
@@ -204,11 +219,22 @@ def _model_present(model: str) -> tuple[bool, str]:
     hub = _hub_cache()
     if not hub.is_dir():
         return False, f"Hugging Face cache not found at {hub}"
-    needle = model.lower().replace("/", "--")
-    matches = [path for path in hub.iterdir() if path.is_dir() and needle in path.name.lower()]
-    if matches:
-        return True, str(matches[0])
-    return False, f"{model} not found under {hub}"
+    expected = hub / _faster_whisper_hub_dirname(model)
+    if expected.is_dir():
+        return True, str(expected)
+    return False, f"{model} not found under {hub} (expected {expected.name})"
+
+
+def _faster_whisper_hub_dirname(model: str) -> str:
+    """Exact Hugging Face hub directory for a faster-whisper model id or alias."""
+    repo_id = model
+    try:
+        from faster_whisper.utils import _MODELS
+
+        repo_id = _MODELS.get(model, model)
+    except ImportError:
+        pass
+    return f"models--{repo_id.replace('/', '--')}"
 
 
 def _hub_cache() -> Path:
