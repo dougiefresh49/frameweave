@@ -1,0 +1,198 @@
+# Common automatic-caption mishearings in tech videos.
+#
+# Each row is one mangle: ``heard`` is the word or phrase automatic captions
+# tend to produce, ``meant`` is the term actually said, and ``context`` is a
+# one-phrase pointer to what the term is. `frameweave.format.readme` shows a
+# row only when its ``heard`` form occurs in the transcript text, plus every
+# row from a ``--glossary`` file. This table is a starting point: add rows as
+# real transcripts turn up new mishearings. Wording stays neutral and factual.
+
+[[mangle]]
+heard = "codecs"
+meant = "codex"
+context = "OpenAI's coding agent CLI"
+
+[[mangle]]
+heard = "cloud"
+meant = "Claude"
+context = "Anthropic's model family"
+
+[[mangle]]
+heard = "clod"
+meant = "Claude"
+context = "Anthropic's model family"
+
+[[mangle]]
+heard = "curser"
+meant = "Cursor"
+context = "AI code editor"
+
+[[mangle]]
+heard = "you v"
+meant = "uv"
+context = "Python package and project manager"
+
+[[mangle]]
+heard = "MPM"
+meant = "npm"
+context = "Node package manager"
+
+[[mangle]]
+heard = "pin pm"
+meant = "pnpm"
+context = "Node package manager"
+
+[[mangle]]
+heard = "versel"
+meant = "Vercel"
+context = "hosting and deployment platform"
+
+[[mangle]]
+heard = "super base"
+meant = "Supabase"
+context = "hosted Postgres and backend platform"
+
+[[mangle]]
+heard = "next JS"
+meant = "Next.js"
+context = "React framework"
+
+[[mangle]]
+heard = "tan stack"
+meant = "TanStack"
+context = "web app tooling (Query, Router, Table)"
+
+[[mangle]]
+heard = "tail wind"
+meant = "Tailwind"
+context = "CSS framework"
+
+[[mangle]]
+heard = "post grass"
+meant = "Postgres"
+context = "relational database"
+
+[[mangle]]
+heard = "doctor"
+meant = "Docker"
+context = "container runtime"
+
+[[mangle]]
+heard = "cooper netties"
+meant = "Kubernetes"
+context = "container orchestration platform"
+
+[[mangle]]
+heard = "sash"
+meant = "SSH"
+context = "secure remote login protocol"
+
+[[mangle]]
+heard = "Jason"
+meant = "JSON"
+context = "data interchange format"
+
+[[mangle]]
+heard = "yamal"
+meant = "YAML"
+context = "configuration file format"
+
+[[mangle]]
+heard = "rejex"
+meant = "regex"
+context = "pattern-matching syntax"
+
+[[mangle]]
+heard = "a sink"
+meant = "async"
+context = "asynchronous code keyword"
+
+[[mangle]]
+heard = "and tropic"
+meant = "Anthropic"
+context = "AI research and product company"
+
+[[mangle]]
+heard = "open eye"
+meant = "OpenAI"
+context = "AI research and product company"
+
+[[mangle]]
+heard = "GBT"
+meant = "GPT"
+context = "generative pretrained transformer model family"
+
+[[mangle]]
+heard = "jem in eye"
+meant = "Gemini"
+context = "Google's model family"
+
+[[mangle]]
+heard = "Ellen M"
+meant = "LLM"
+context = "large language model"
+
+[[mangle]]
+heard = "em seep"
+meant = "MCP"
+context = "Model Context Protocol"
+
+[[mangle]]
+heard = "klee"
+meant = "CLI"
+context = "command-line interface"
+
+[[mangle]]
+heard = "reap oh"
+meant = "repo"
+context = "source code repository"
+
+[[mangle]]
+heard = "get hub"
+meant = "GitHub"
+context = "code hosting platform"
+
+[[mangle]]
+heard = "get"
+meant = "Git"
+context = "version control system"
+
+[[mangle]]
+heard = "Tyler script"
+meant = "TypeScript"
+context = "typed superset of JavaScript"
+
+[[mangle]]
+heard = "Russ"
+meant = "Rust"
+context = "systems programming language"
+
+[[mangle]]
+heard = "buns"
+meant = "Bun"
+context = "JavaScript runtime and toolchain"
+
+[[mangle]]
+heard = "the no"
+meant = "Deno"
+context = "JavaScript and TypeScript runtime"
+
+[[mangle]]
+heard = "zawd"
+meant = "Zod"
+context = "schema validation library"
+
+[[mangle]]
+heard = "Prysma"
+meant = "Prisma"
+context = "database ORM"
+
+[[mangle]]
+heard = "clerk"
+meant = "Clerk"
+context = "authentication and user management platform, captioned as the common word"
+
+[[mangle]]
+heard = "convex"
+meant = "Convex"
+context = "backend and database platform, captioned as the geometry term"
