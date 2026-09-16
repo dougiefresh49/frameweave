@@ -952,8 +952,8 @@ def _stage_assemble(ctx: RunContext) -> StageResult:
         frames,
         descriptions,
         meta,
+        header_chapters=ctx.resolved.chapters,
     )
-    _restore_chapters_header(out / "transcript.fwv", ctx.resolved)
     write_meta(out, ctx.resolved, frames, meta)
     cost = ctx.ledger.summary()
     if ctx.lane_actual is None:
@@ -1101,43 +1101,6 @@ def _transcript_window(segments: list[Segment], batch: list[Frame]) -> str:
     if len(text) > _CONTEXT_CAP:
         return text[:_CONTEXT_CAP]
     return text
-
-
-def _restore_chapters_header(path: Path, resolved: Resolved) -> None:
-    """Rewrite ``chapters:`` to the whole-video list after a windowed body write."""
-    if not resolved.chapters or not path.is_file():
-        return
-    rendered = "; ".join(
-        f"{timecode.format(ch.start, tenths=False)} {ch.title.replace(';', ',')}"
-        for ch in resolved.chapters
-    )
-    wanted = f"chapters: {rendered}"
-    lines = path.read_text(encoding="utf-8").splitlines()
-    out: list[str] = []
-    found = False
-    blank_at: int | None = None
-    for index, line in enumerate(lines):
-        if line.startswith("chapters:"):
-            out.append(wanted)
-            found = True
-            continue
-        if blank_at is None and line == "" and index > 0:
-            blank_at = len(out)
-        out.append(line)
-    if not found:
-        insert_at = blank_at if blank_at is not None else len(out)
-        out.insert(insert_at, wanted)
-    _atomic_write_text(path, "\n".join(out) + "\n")
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        temporary.write_text(text, encoding="utf-8")
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _sha256_file(path: Path) -> str:
