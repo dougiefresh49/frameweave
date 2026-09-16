@@ -58,6 +58,17 @@ def test_summary_current_reused_unknown(tmp_path: Path) -> None:
     assert second["total_usd"] == second["current_run_usd"] + second["reused_usd"]
 
 
+def test_drop_stage_removes_prior_lines(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    ledger = Ledger(run_dir)
+    ledger.append(_entry(stage="describe", usd=0.02))
+    ledger.append(_entry(stage="describe", usd=0.03))
+    ledger.append(_entry(stage="transcript", usd=0.0))
+    ledger.drop_stage("describe")
+    stages = {e.stage for e in ledger.entries()}
+    assert stages == {"transcript"}
+
+
 def test_reconcile_calls_deleter(tmp_path: Path) -> None:
     from frameweave import ledger as ledger_mod
 

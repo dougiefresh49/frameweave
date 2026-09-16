@@ -65,7 +65,32 @@ class FakeSource:
         src = Path(resolved.source)
         dest = dest_dir / "media.mp4"
         if not dest.is_file():
-            shutil.copyfile(src, dest)
+            # Mux silent audio so STT extract/chunk always has a stream (testsrc is
+            # video-only). Real sources already carry audio.
+            import subprocess
+
+            proc = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-nostdin",
+                    "-y",
+                    "-i",
+                    str(src),
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "anullsrc=r=16000:cl=mono",
+                    "-shortest",
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "aac",
+                    str(dest),
+                ],
+                capture_output=True,
+            )
+            if proc.returncode != 0:
+                shutil.copyfile(src, dest)
         meta = dest_dir / "media.json"
         digest = hashlib.sha256(dest.read_bytes()).hexdigest()
         meta.write_text(
@@ -86,6 +111,7 @@ class FakeStt:
     segments: list[Segment] = field(default_factory=list)
     name: str = "stt-fake"
     calls: int = 0
+    paths: list[Path] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.segments:
@@ -95,7 +121,8 @@ class FakeStt:
             ]
 
     def transcribe(self, audio: Path, config: Any) -> SttResult:
-        del audio, config
+        self.paths.append(Path(audio))
+        del config
         self.calls += 1
         return SttResult(
             segments=list(self.segments),

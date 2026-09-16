@@ -15,7 +15,7 @@ import shutil
 import signal
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -105,8 +105,6 @@ class RunContext:
     output_path: Path | None = None
     completion: str = "complete"
     cost_usd: float = 0.0
-    # Injection for tests: override source pick / backends already on fields above.
-    _force_redo_from: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -162,8 +160,11 @@ def run(
 ) -> RunOutcome:
     """Execute the stage registry and return the assembled output path."""
     progress_fn = progress or _progress_noop
-    redo_set = set(redo)
+    redo_set = _cascade_redo(set(redo))
     config = _with_resolved_lane(config)
+    # Fail before any stage spends quota when the output root is missing.
+    require_out(config)
+    stt = _prepare_stt(config, stt)
     reconcile(config.cache_dir)
 
     picked = source or _pick_source(raw_input)
@@ -190,7 +191,6 @@ def run(
         frames_only=frames_only,
         stt=stt,
         vision=vision,
-        _force_redo_from=_cascade_redo(redo_set),
     )
 
     _install_handlers(ctx)
@@ -226,10 +226,13 @@ def _execute_stage(
         _write_inputs(ctx, stage, by_name)
         return result
 
-    if stage.name not in ctx._force_redo_from:
+    if stage.name not in ctx.redo:
         reused = _try_reuse(ctx, stage, by_name)
         if reused is not None:
             return reused
+
+    if stage.keyed:
+        ctx.ledger.drop_stage(stage.name)
 
     result = stage.run(ctx)
     if result.status == "done":
@@ -244,6 +247,8 @@ def _try_reuse(
     artifact = _artifact_path(ctx, stage)
     inputs_path = _inputs_path(ctx, stage)
     if artifact.is_file() and _inputs_match(inputs_path, expected):
+        if stage.name == "assemble" and not _assemble_output_exists(artifact):
+            return None
         _hydrate_after_reuse(ctx, stage)
         return StageResult(stage=stage.name, status="reused", artifact=str(artifact))
 
@@ -261,6 +266,15 @@ def _try_reuse(
             _hydrate_after_reuse(ctx, stage)
             return StageResult(stage=stage.name, status="reused", artifact=str(artifact))
     return None
+
+
+def _assemble_output_exists(artifact: Path) -> bool:
+    try:
+        data = json.loads(artifact.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    path = data.get("output_path")
+    return isinstance(path, str) and Path(path).is_dir()
 
 
 def _find_sibling(
@@ -338,7 +352,23 @@ def _dependency_digests(
         dep = by_name[dep_name]
         path = _artifact_path(ctx, dep)
         digests[dep_name] = _sha256_file(path) if path.is_file() else ""
+    if stage.name == "transcript":
+        digests["settings"] = _transcript_settings_digest(ctx.config)
+    if stage.name == "assemble":
+        digests["out"] = str(require_out(ctx.config).resolve())
     return digests
+
+
+def _transcript_settings_digest(config: Config) -> str:
+    payload = {
+        "stt_backend": config.stt_backend,
+        "stt_model": config.stt_model,
+        "stt_device": config.stt_device,
+        "speakers": config.speakers,
+        "captions_mode": config.captions_mode,
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode()).hexdigest()
 
 
 def _inputs_match(path: Path, expected: dict[str, str]) -> bool:
@@ -373,30 +403,18 @@ def _with_resolved_lane(config: Config) -> Config:
     if config.vision_lane != "auto":
         return config
     # Until #26, auto means claude.
-    return Config(
-        out=config.out,
-        cache_dir=config.cache_dir,
-        vision_lane="claude",
-        vision_model=dict(config.vision_model),
-        vision_quality=config.vision_quality,
-        frames_per_call=config.frames_per_call,
-        frame_interval_s=config.frame_interval_s,
-        frame_width=config.frame_width,
-        max_frames=config.max_frames,
-        stt_backend=config.stt_backend,
-        stt_model=config.stt_model,
-        stt_device=config.stt_device,
-        speakers=config.speakers,
-        timeout_s=config.timeout_s,
-        concurrency=config.concurrency,
-        glossary=config.glossary,
-        lane_skip_percent=config.lane_skip_percent,
-        disk_warn_gb=config.disk_warn_gb,
-        prompt_revision=config.prompt_revision,
-        channels=dict(config.channels),
-        captions_mode=config.captions_mode,
-        vision_effort=config.vision_effort,
-    )
+    return replace(config, vision_lane="claude")
+
+
+def _prepare_stt(config: Config, stt: SttBackend | None) -> SttBackend | None:
+    """Build the STT backend; raise SpeakersUnavailable before stage 1 when needed."""
+    if stt is not None:
+        return stt
+    if config.speakers:
+        from frameweave.stt.speakers import make_diarizer
+
+        return WhisperXBackend(diarize=make_diarizer(config))
+    return None
 
 
 def _pick_source(raw_input: str) -> Source:
@@ -428,6 +446,10 @@ def _stage_fetch_media(ctx: RunContext) -> StageResult:
             meta,
             {"sha256": digest, "bytes": media.stat().st_size, "path": media.name},
         )
+    after = getattr(ctx.source, "resolved_after_fetch", None)
+    if callable(after):
+        ctx.resolved = after(ctx.source_dir)
+        _atomic_json(ctx.source_dir / "resolved.json", ctx.resolved.to_dict())
     return StageResult(stage="fetch_media", status="done", artifact=str(meta))
 
 
@@ -446,8 +468,6 @@ def _stage_fetch_captions(ctx: RunContext) -> StageResult:
                     "reason": result.reason,
                 },
             )
-            if result.reason:
-                ctx.warnings.append(result.reason)
         return StageResult(
             stage="fetch_captions",
             status="done",
@@ -487,41 +507,43 @@ def _stage_transcript(ctx: RunContext) -> StageResult:
     else:
         backend = ctx.stt or _default_stt(ctx.config)
         usage = Usage()
-        if ctx.stt is not None:
-            # Injected backends (tests) skip ffmpeg audio prep; fixtures may lack audio.
-            result = backend.transcribe(_media_file(ctx.source_dir), ctx.config)
+        media = _media_file(ctx.source_dir)
+        audio = stt_audio.extract(media, ctx.run_dir, timeout_s=ctx.config.timeout_s)
+        chunks = stt_audio.chunk(audio, ctx.run_dir, timeout_s=ctx.config.timeout_s)
+        results: list[tuple[Any, SttResult]] = []
+        for piece in chunks:
+            result = backend.transcribe(piece.path, ctx.config)
+            results.append((piece, result))
+            usage = usage + result.usage
+        if not results:
+            result = backend.transcribe(audio, ctx.config)
             segments = clamp_to_words(result.segments)
             source_tag = result.source
             usage = usage + result.usage
             silent = is_silent(result)
         else:
-            media = _media_file(ctx.source_dir)
-            audio = stt_audio.extract(media, ctx.run_dir, timeout_s=ctx.config.timeout_s)
-            chunks = stt_audio.chunk(audio, ctx.run_dir, timeout_s=ctx.config.timeout_s)
-            results: list[tuple[Any, SttResult]] = []
-            for piece in chunks:
-                result = backend.transcribe(piece.path, ctx.config)
-                results.append((piece, result))
-                usage = usage + result.usage
-            if not results:
-                result = backend.transcribe(audio, ctx.config)
-                segments = clamp_to_words(result.segments)
-                source_tag = result.source
-                usage = usage + result.usage
-                silent = is_silent(result)
-            else:
-                segments = clamp_to_words(merge_chunks(results))
-                source_tag = results[0][1].source if results else "stt"
-                silent = not segments
-        if silent:
-            ctx.warnings.append("no speech")
+            segments = clamp_to_words(merge_chunks(results))
+            source_tag = results[0][1].source if results else "stt"
+            silent = not segments
+        started = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        ended = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        provider = getattr(backend, "name", ctx.config.stt_backend)
+        ctx.ledger.append(
+            LedgerEntry(
+                stage="transcript",
+                provider=str(provider),
+                model=ctx.config.stt_model,
+                started=started,
+                ended=ended,
+                usage=usage,
+                status="ok",
+            )
+        )
 
     # Assign ids if missing.
     numbered: list[Segment] = []
     for index, seg in enumerate(segments, start=1):
         if seg.id is None:
-            from dataclasses import replace
-
             numbered.append(replace(seg, id=f"s{index:04d}"))
         else:
             numbered.append(seg)
@@ -695,7 +717,7 @@ def _stage_assemble(ctx: RunContext) -> StageResult:
         generated_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         tool_version=__version__,
         caption_track=captions.track,
-        command_line=f"frameweave run {ctx.raw_input}",
+        command_line=f"frameweave run {ctx.resolved.source}",
     )
 
     write_transcript(out, ctx.resolved, segments, frames, descriptions, meta)
@@ -885,7 +907,12 @@ def _cleanup_on_signal(ctx: RunContext) -> None:
             if not path.is_file():
                 continue
             name = path.name
-            if name.endswith(".partial") or name.endswith(".tmp.jpg") or ".tmp." in name:
+            if (
+                name.endswith(".partial")
+                or name.endswith(".tmp.jpg")
+                or name.endswith(".tmp")
+                or ".tmp." in name
+            ):
                 path.unlink(missing_ok=True)
 
 

@@ -61,6 +61,34 @@ class Ledger:
         """Accumulate dollars from a stage reused from a prior run's ledger."""
         self._reused_usd += float(usd)
 
+    def drop_stage(self, stage: str) -> None:
+        """Remove prior ledger lines for ``stage`` so a redo does not double-count."""
+        if not self.path.is_file():
+            return
+        kept: list[str] = []
+        removed = 0
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            entry = LedgerEntry.from_dict(json.loads(line))
+            if entry.stage == stage:
+                removed += 1
+                continue
+            kept.append(line)
+        if removed == 0:
+            return
+        # Prior lines that remain are still "prior"; this-run counter stays as-is
+        # because dropped lines were never part of ``_entries_this_run``.
+        temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+        try:
+            temporary.write_text(
+                ("\n".join(kept) + ("\n" if kept else "")),
+                encoding="utf-8",
+            )
+            temporary.replace(self.path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def entries(self) -> list[LedgerEntry]:
         if not self.path.is_file():
             return []
