@@ -151,7 +151,8 @@ def test_preflight_checks_empty_when_speakers_off() -> None:
 def test_preflight_checks_reports_token_and_pyannote(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("HF_TOKEN", raising=False)
+        pytest.importorskip("pyannote.audio")  # extras group, not installed in CI
+monkeypatch.delenv("HF_TOKEN", raising=False)
     checks = preflight_checks(_config(speakers=True))
     assert [c.name for c in checks] == ["HF_TOKEN", "pyannote.audio"]
     assert checks[0].ok is False
@@ -264,7 +265,8 @@ def test_merge_and_diarize_calls_diarizer_once_with_full_audio(tmp_path: Path) -
 
 
 def test_diarize_passes_community_1_model_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        pytest.importorskip("whisperx")  # extras group, not installed in CI
+monkeypatch.setenv("HF_TOKEN", "hf_test_token")
     captured: dict[str, Any] = {}
 
     class FakePipeline:
