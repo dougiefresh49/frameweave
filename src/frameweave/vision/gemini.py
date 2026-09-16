@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from google import genai
 from google.genai import types
 
+from frameweave.ledger import RATES_USD_PER_MILLION
 from frameweave.types import Description, Frame, Usage
 from frameweave.util.retry import (
     Outcome,
@@ -30,11 +31,6 @@ from frameweave.vision.base import (
 
 if TYPE_CHECKING:
     from frameweave.config import Config
-
-RATES_USD_PER_MILLION: dict[str, tuple[float, float]] = {
-    "gemini-3.5-flash-lite": (0.30, 2.50),
-    "gemini-3.6-flash": (0.75, 3.75),
-}
 
 
 class GeminiBackend:
