@@ -466,3 +466,89 @@ def test_segment_ids_assigned_when_missing(tmp_path: Path) -> None:
     ]
     write_transcript(tmp_path, resolved, segments, [], [], _meta())
     assert [s.id for s in segments] == ["s0001", "s0099", "s0003"]
+
+
+_QUOTED_STRING = re.compile(r'"(?:\\.|[^"\\])*"')
+
+
+def _unescape_fwv_string(body: str) -> str:
+    """Un-escape the two sequences a reader must honor: ``\\\\`` and ``\\"``."""
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        if body[i] == "\\" and i + 1 < len(body) and body[i + 1] in '"\\':
+            out.append(body[i + 1])
+            i += 2
+        else:
+            out.append(body[i])
+            i += 1
+    return "".join(out)
+
+
+def _read_quoted_strings(text_line: str) -> list[str]:
+    """Parse a ``  text: "..."`` line and return unescaped string payloads."""
+    assert text_line.startswith("  text:")
+    return [_unescape_fwv_string(m.group(0)[1:-1]) for m in _QUOTED_STRING.finditer(text_line)]
+
+
+def test_quoted_string_escapes_round_trip(tmp_path: Path) -> None:
+    """Issue #41: ``"`` → ``\\"``, ``\\`` → ``\\\\``; reader honors both."""
+    resolved = Resolved(video_id="v", title="t", channel="c", source="/v.mp4", duration=10.0)
+    frames = [Frame("f0001", 0.0, "primary", "frames/f0001-00-00-00.0.jpg")]
+    originals = ['say "hi"', r"path\to", r'say "hi" and \escape']
+    descriptions = [
+        Description("f0001", "claude:sonnet", "Has quotes and backslashes.", originals),
+    ]
+    text = write_transcript(
+        tmp_path, resolved, [], frames, descriptions, _meta(),
+    ).read_text(encoding="utf-8")
+    text_line = next(ln for ln in text.splitlines() if ln.startswith("  text:"))
+    assert r'\"' in text_line
+    assert r"\\" in text_line
+    assert _read_quoted_strings(text_line) == originals
+
+
+def test_tab_and_crlf_in_description_collapse(tmp_path: Path) -> None:
+    """Issue #41: tab and CRLF in a description sentence collapse to one space."""
+    resolved = Resolved(video_id="v", title="t", channel="c", source="/v.mp4", duration=10.0)
+    frames = [Frame("f0001", 0.0, "primary", "frames/f0001-00-00-00.0.jpg")]
+    descriptions = [
+        Description(
+            "f0001",
+            "claude:sonnet",
+            "A sentence\twith a tab\r\nand a CRLF.",
+            ["ok"],
+        ),
+    ]
+    text = write_transcript(
+        tmp_path, resolved, [], frames, descriptions, _meta(),
+    ).read_text(encoding="utf-8")
+    assert "A sentence with a tab and a CRLF." in text
+    assert "\t" not in text
+    assert "\r" not in text
+
+
+def test_chapter_semicolon_kept_on_heading_flattened_in_header(tmp_path: Path) -> None:
+    """Issue #41: ``;`` stays on ``##`` lines; header list uses ``,`` instead."""
+    resolved = Resolved(
+        video_id="v",
+        title="t",
+        channel="c",
+        source="/v.mp4",
+        duration=120.0,
+        chapters=[
+            Chapter(0.0, "Intro; setup"),
+            Chapter(60.0, "Part A; Part B"),
+        ],
+    )
+    segments = [
+        Segment(0.0, 5.0, "hello", "captions"),
+        Segment(60.0, 65.0, "later", "captions"),
+    ]
+    text = write_transcript(tmp_path, resolved, segments, [], [], _meta()).read_text(
+        encoding="utf-8"
+    )
+    header = text.split("\n\n", 1)[0]
+    assert "chapters: 00:00:00 Intro, setup; 00:01:00 Part A, Part B" in header
+    assert "## [00:00:00] Intro; setup" in text
+    assert "## [00:01:00] Part A; Part B" in text

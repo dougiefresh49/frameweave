@@ -240,7 +240,9 @@ def _header_lines(
         ]
     )
     if resolved.chapters:
-        rendered = "; ".join(f"{_clock(ch.start)} {ch.title}" for ch in resolved.chapters)
+        rendered = "; ".join(
+            f"{_clock(ch.start)} {_chapter_header_title(ch.title)}" for ch in resolved.chapters
+        )
         lines.append(f"chapters: {rendered}")
     for key, value in extra_headers.items():
         lines.append(f"{key}: {value}")
@@ -303,6 +305,16 @@ def _collapse_ws(text: str) -> str:
     return " ".join(text.split())
 
 
+def _escape_quoted(text: str) -> str:
+    """Escape ``\\`` and ``"`` for a quoted ``text:`` string (after flatten)."""
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _chapter_header_title(title: str) -> str:
+    """Replace ``;`` with ``,`` in the ``chapters:`` header list only."""
+    return title.replace(";", ",")
+
+
 def _said_line(seg: Segment) -> str:
     text = _collapse_ws(seg.text)
     payload = text
@@ -328,7 +340,7 @@ def _seen_lines(
     else:
         summary = _collapse_ws(desc.summary)
         if desc.strings:
-            quoted = ", ".join(f'"{_collapse_ws(s)}"' for s in desc.strings)
+            quoted = ", ".join(f'"{_escape_quoted(_collapse_ws(s))}"' for s in desc.strings)
             text_line = f"  text: {quoted}"
         elif desc.illegible:
             text_line = "  text: illegible"
