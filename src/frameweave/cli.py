@@ -48,7 +48,9 @@ _OUTPUT_TOKENS_PER_FRAME = 120
 _GB = 1024**3
 _SUBSCRIPTION_LANES = frozenset({"claude", "codex"})
 # Dest names that are CLI/pipeline control, not Config fields.
-_CLI_ONLY_DESTS = frozenset({"debug", "dry_run", "doctor_json", "redo", "frames_only", "out"})
+_CLI_ONLY_DESTS = frozenset(
+    {"debug", "dry_run", "doctor_json", "redo", "frames_only", "out", "start", "end", "chapter"}
+)
 
 
 def cli_flags() -> list[FlagSpec]:
@@ -188,12 +190,12 @@ def _collect_flags() -> list[FlagSpec]:
 
 
 def _flag_modules() -> list[str]:
-    # config first for dedup; pipeline + this module are not in MODULES but own flags.
+    # config first for dedup; pipeline + range + this module are not in MODULES but own flags.
     ordered = ["frameweave.config"]
     for name in MODULES:
         if name not in ordered:
             ordered.append(name)
-    for name in ("frameweave.pipeline", "frameweave.cli"):
+    for name in ("frameweave.range", "frameweave.pipeline", "frameweave.cli"):
         if name not in ordered:
             ordered.append(name)
     return ordered
@@ -288,6 +290,21 @@ def _cmd_run(
     frames_only = bool(getattr(args, "frames_only", False))
     redo = getattr(args, "redo", None) or ()
 
+    from frameweave.range import parse as parse_range
+    from frameweave.range import url_t_from
+
+    start = getattr(args, "start", None)
+    end = getattr(args, "end", None)
+    chapter = getattr(args, "chapter", None)
+    url_t = url_t_from(args.input)
+    defer = float(resolved.duration) <= 0.0 and callable(
+        getattr(source, "resolved_after_fetch", None)
+    )
+    range_spec = parse_range(
+        start, end, chapter, url_t, resolved, defer_bounds=defer
+    )
+    range_label = range_spec.label
+
     printed_estimate = False
 
     def progress(msg: str) -> None:
@@ -302,7 +319,7 @@ def _cmd_run(
         if not quiet:
             print(msg, file=out)
         if msg.startswith("stage frames:"):
-            _print_frames_line(config, resolved.video_id, out)
+            _print_frames_line(config, resolved.video_id, out, range_label=range_label)
 
     try:
         outcome = pipeline.run(
@@ -316,6 +333,10 @@ def _cmd_run(
             vision=backends.get("vision") if backends else None,
             out_override=out_override,
             resolved=resolved,
+            start=start,
+            end=end,
+            chapter=chapter,
+            url_t=url_t,
         )
     except Exception as exc:
         return _handle_error(exc, bool(getattr(args, "debug", False)), err)
@@ -407,11 +428,13 @@ def _print_estimate(resolved: Resolved, config: Config, out: TextIO) -> None:
         print("dollars (est): $0 (subscription)", file=out)
 
 
-def _print_frames_line(config: Config, video_id: str, out: TextIO) -> None:
+def _print_frames_line(
+    config: Config, video_id: str, out: TextIO, *, range_label: str = "full"
+) -> None:
     # Match the pipeline's run key (auto → claude until #26).
     keyed = config if config.vision_lane != "auto" else replace(config, vision_lane="claude")
     try:
-        key = make_run_key(keyed, "full")
+        key = make_run_key(keyed, range_label)
     except ConfigError:
         return
     path = Path(config.cache_dir) / "runs" / video_id / key / "frames.json"
@@ -477,6 +500,10 @@ def _handle_error(exc: BaseException, debug: bool, err: TextIO) -> int:
 def _stage_for_error(exc: BaseException) -> str:
     if isinstance(exc, ConfigError):
         return "config"
+    from frameweave.range import RangeError
+
+    if isinstance(exc, RangeError):
+        return "range"
     if isinstance(exc, (SourceBusy, NotMediaError)):
         return "fetch_media"
     if isinstance(exc, SttError):

@@ -48,6 +48,8 @@ from frameweave.format.writer import (
 from frameweave.frames import extract as extract_frames
 from frameweave.frames import plan as plan_frames
 from frameweave.ledger import Ledger, dollars_for_stage, reconcile
+from frameweave.range import RangeSpec, overlaps
+from frameweave.range import parse as parse_range
 from frameweave.sources.http import HttpSource
 from frameweave.sources.local import LocalFileSource
 from frameweave.sources.youtube import YouTubeSource, claim
@@ -64,6 +66,7 @@ from frameweave.types import (
     StageResult,
     Usage,
 )
+from frameweave.util import timecode
 from frameweave.vision.base import VisionBackend, make_backend
 
 _CONTEXT_CAP = 2000
@@ -94,7 +97,7 @@ class RunContext:
     source_dir: Path
     run_dir: Path
     run_key: str
-    range_spec: str
+    range_spec: RangeSpec
     ledger: Ledger
     progress: Callable[[str], None]
     redo: set[str]
@@ -106,6 +109,12 @@ class RunContext:
     completion: str = "complete"
     cost_usd: float = 0.0
     out_override: Path | None = None
+    range_start: str | None = None
+    range_end: str | None = None
+    range_chapter: str | None = None
+    range_url_t: float | None = None
+    range_locked: bool = False
+    range_deferred: bool = False
 
 
 @dataclass(frozen=True)
@@ -160,6 +169,11 @@ def run(
     vision: VisionBackend | None = None,
     out_override: Path | None = None,
     resolved: Resolved | None = None,
+    range_spec: RangeSpec | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    chapter: str | None = None,
+    url_t: float | None = None,
 ) -> RunOutcome:
     """Execute the stage registry and return the assembled output path."""
     progress_fn = progress or _progress_noop
@@ -176,7 +190,20 @@ def run(
     resolved = resolved if resolved is not None else picked.resolve(raw_input)
     source_dir = Path(config.cache_dir) / "sources" / resolved.video_id
     source_dir.mkdir(parents=True, exist_ok=True)
-    key = make_run_key(config, "full")
+    locked = range_spec is not None
+    deferred = (
+        not locked
+        and float(resolved.duration) <= 0.0
+        and callable(getattr(picked, "resolved_after_fetch", None))
+    )
+    rs = range_spec or parse_range(
+        start, end, chapter, url_t, resolved, defer_bounds=deferred
+    )
+    if deferred:
+        # Key and run dir wait until duration is known (post-fetch refresh).
+        key = "_pending_range"
+    else:
+        key = make_run_key(config, rs.label)
     run_dir = Path(config.cache_dir) / "runs" / resolved.video_id / key
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -189,7 +216,7 @@ def run(
         source_dir=source_dir,
         run_dir=run_dir,
         run_key=key,
-        range_spec="full",
+        range_spec=rs,
         ledger=ledger,
         progress=progress_fn,
         redo=redo_set,
@@ -197,6 +224,12 @@ def run(
         stt=stt,
         vision=vision,
         out_override=out_override,
+        range_start=None if locked else start,
+        range_end=None if locked else end,
+        range_chapter=None if locked else chapter,
+        range_url_t=None if locked else url_t,
+        range_locked=locked,
+        range_deferred=deferred,
     )
 
     _install_handlers(ctx)
@@ -320,10 +353,40 @@ def _hydrate_after_reuse(ctx: RunContext, stage: Stage) -> None:
     if stage.name == "resolve":
         data = json.loads(_artifact_path(ctx, stage).read_text(encoding="utf-8"))
         ctx.resolved = Resolved.from_dict(data)
+        _refresh_range(ctx)
     elif stage.name == "assemble":
         data = json.loads(_artifact_path(ctx, stage).read_text(encoding="utf-8"))
         ctx.output_path = Path(data["output_path"])
         ctx.completion = data.get("completion", ctx.completion)
+
+
+def _refresh_range(ctx: RunContext) -> None:
+    """Recompute the range after resolved duration/chapters become final."""
+    if ctx.range_locked or ctx.resolved is None:
+        return
+    still_unknown = ctx.range_deferred and float(ctx.resolved.duration) <= 0.0
+    ctx.range_spec = parse_range(
+        ctx.range_start,
+        ctx.range_end,
+        ctx.range_chapter,
+        ctx.range_url_t,
+        ctx.resolved,
+        defer_bounds=still_unknown,
+    )
+    if ctx.range_deferred and float(ctx.resolved.duration) > 0.0:
+        _bind_run_placement(ctx)
+        ctx.range_deferred = False
+
+
+def _bind_run_placement(ctx: RunContext) -> None:
+    """Set run key and directory from the finalized range label."""
+    assert ctx.resolved is not None
+    key = make_run_key(ctx.config, ctx.range_spec.label)
+    run_dir = Path(ctx.config.cache_dir) / "runs" / ctx.resolved.video_id / key
+    run_dir.mkdir(parents=True, exist_ok=True)
+    ctx.run_key = key
+    ctx.run_dir = run_dir
+    ctx.ledger = Ledger(run_dir)
 
 
 def _write_skip_stub(ctx: RunContext, stage: Stage) -> StageResult:
@@ -359,7 +422,7 @@ def _dependency_digests(
         path = _artifact_path(ctx, dep)
         digests[dep_name] = _sha256_file(path) if path.is_file() else ""
     if stage.name == "transcript":
-        digests["settings"] = _transcript_settings_digest(ctx.config)
+        digests["settings"] = _transcript_settings_digest(ctx.config, ctx.range_spec)
     if stage.name == "assemble":
         if ctx.out_override is not None:
             digests["out"] = str(ctx.out_override.resolve())
@@ -368,13 +431,14 @@ def _dependency_digests(
     return digests
 
 
-def _transcript_settings_digest(config: Config) -> str:
+def _transcript_settings_digest(config: Config, range_spec: RangeSpec) -> str:
     payload = {
         "stt_backend": config.stt_backend,
         "stt_model": config.stt_model,
         "stt_device": config.stt_device,
         "speakers": config.speakers,
         "captions_mode": config.captions_mode,
+        "range": range_spec.label,
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()
@@ -459,6 +523,8 @@ def _stage_fetch_media(ctx: RunContext) -> StageResult:
     if callable(after):
         ctx.resolved = after(ctx.source_dir)
         _atomic_json(ctx.source_dir / "resolved.json", ctx.resolved.to_dict())
+        if not ctx.range_locked:
+            _refresh_range(ctx)
     return StageResult(stage="fetch_media", status="done", artifact=str(meta))
 
 
@@ -549,13 +615,19 @@ def _stage_transcript(ctx: RunContext) -> StageResult:
             )
         )
 
-    # Assign ids if missing.
+    # Assign ids if missing, then keep only segments that overlap the range.
     numbered: list[Segment] = []
     for index, seg in enumerate(segments, start=1):
         if seg.id is None:
             numbered.append(replace(seg, id=f"s{index:04d}"))
         else:
             numbered.append(seg)
+    rs = ctx.range_spec
+    numbered = [
+        seg
+        for seg in numbered
+        if overlaps(seg.start, seg.end, rs.start, rs.end)
+    ]
 
     _atomic_json(
         path,
@@ -579,16 +651,35 @@ def _stage_frames(ctx: RunContext) -> StageResult:
     path = ctx.run_dir / "frames.json"
     transcript = _load_transcript(ctx.run_dir / "transcript.json")
     media = _media_file(ctx.source_dir)
-    planned = plan_frames(transcript["segments"], ctx.resolved.duration, ctx.config)
-    frames = extract_frames(media, planned, ctx.run_dir, ctx.config)
+    rs = ctx.range_spec
+    window = rs.end - rs.start
+    # Plan in window-relative time, then shift candidates back to absolute.
+    relative = [
+        replace(seg, start=seg.start - rs.start, end=seg.end - rs.start)
+        for seg in transcript["segments"]
+    ]
+    planned = plan_frames(relative, window, ctx.config)
+    absolute_frames: list[Frame] = []
+    for frame in planned.frames:
+        time = round(frame.time + rs.start, 1)
+        stamp = timecode.format(time).replace(":", "-")
+        absolute_frames.append(
+            replace(frame, time=time, path=f"frames/{frame.id}-{stamp}.jpg")
+        )
+    absolute_plan = replace(
+        planned,
+        frames=absolute_frames,
+        windows=[(a + rs.start, b + rs.start) for a, b in planned.windows],
+    )
+    frames = extract_frames(media, absolute_plan, ctx.run_dir, ctx.config)
     _atomic_json(
         path,
         {
             "frames": [f.to_dict() for f in frames],
-            "windows": [[a, b] for a, b in planned.windows],
-            "budget": planned.budget,
-            "interval_s": planned.interval_s,
-            "merged": planned.merged,
+            "windows": [[a, b] for a, b in absolute_plan.windows],
+            "budget": absolute_plan.budget,
+            "interval_s": absolute_plan.interval_s,
+            "merged": absolute_plan.merged,
         },
     )
     return StageResult(stage="frames", status="done", artifact=str(path))
@@ -665,6 +756,7 @@ def _stage_describe(ctx: RunContext) -> StageResult:
 def _stage_assemble(ctx: RunContext) -> StageResult:
     assert ctx.resolved is not None
     marker = ctx.run_dir / "assembled.json"
+    rs = ctx.range_spec
     if ctx.out_override is not None:
         out = output_dir(
             Path("."),
@@ -678,6 +770,7 @@ def _stage_assemble(ctx: RunContext) -> StageResult:
             root,
             channel_slug(ctx.resolved.channel, ctx.config, root),
             slugify(ctx.resolved.title),
+            range_slug=rs.slug or None,
         )
     out.mkdir(parents=True, exist_ok=True)
 
@@ -716,7 +809,7 @@ def _stage_assemble(ctx: RunContext) -> StageResult:
     primary = sum(1 for f in frames if f.kind == "primary")
     extra = sum(1 for f in frames if f.kind == "extra")
     meta = RunMeta(
-        range_spec=ctx.range_spec,
+        range_spec=rs.header,
         transcript_source=transcript.get("source") or "none",
         speakers=None,
         vision=vision,
@@ -737,7 +830,19 @@ def _stage_assemble(ctx: RunContext) -> StageResult:
         command_line=f"frameweave run {ctx.resolved.source}",
     )
 
-    write_transcript(out, ctx.resolved, segments, frames, descriptions, meta)
+    # Body headings only for chapters inside the window; header keeps the full list.
+    window_chapters = [
+        ch for ch in ctx.resolved.chapters if rs.start <= ch.start < rs.end
+    ]
+    write_transcript(
+        out,
+        replace(ctx.resolved, chapters=window_chapters),
+        segments,
+        frames,
+        descriptions,
+        meta,
+    )
+    _restore_chapters_header(out / "transcript.fwv", ctx.resolved)
     write_meta(out, ctx.resolved, frames, meta)
     cost = ctx.ledger.summary()
     write_cost(out, cost)
@@ -853,6 +958,43 @@ def _transcript_window(segments: list[Segment], batch: list[Frame]) -> str:
     if len(text) > _CONTEXT_CAP:
         return text[:_CONTEXT_CAP]
     return text
+
+
+def _restore_chapters_header(path: Path, resolved: Resolved) -> None:
+    """Rewrite ``chapters:`` to the whole-video list after a windowed body write."""
+    if not resolved.chapters or not path.is_file():
+        return
+    rendered = "; ".join(
+        f"{timecode.format(ch.start, tenths=False)} {ch.title.replace(';', ',')}"
+        for ch in resolved.chapters
+    )
+    wanted = f"chapters: {rendered}"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    out: list[str] = []
+    found = False
+    blank_at: int | None = None
+    for index, line in enumerate(lines):
+        if line.startswith("chapters:"):
+            out.append(wanted)
+            found = True
+            continue
+        if blank_at is None and line == "" and index > 0:
+            blank_at = len(out)
+        out.append(line)
+    if not found:
+        insert_at = blank_at if blank_at is not None else len(out)
+        out.insert(insert_at, wanted)
+    _atomic_write_text(path, "\n".join(out) + "\n")
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(text, encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _sha256_file(path: Path) -> str:
