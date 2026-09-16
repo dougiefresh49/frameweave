@@ -42,6 +42,7 @@ Time-valued strings (`timeout_s`, `frame_interval_s`) parse through `util.timeco
 | vision_effort | str | low | FRAMEWEAVE_VISION_EFFORT | vision_effort | codex lane reasoning effort for frames. |
 | usage_snapshot | Path \| None | (module default) | FRAMEWEAVE_USAGE_SNAPSHOT | usage_snapshot | AgentUsageBar JSON path for the lane chooser. None uses the packaged default under Application Support. |
 | usage_refresh_script | Path \| None | (module default) | FRAMEWEAVE_USAGE_REFRESH_SCRIPT | usage_refresh_script | Script that refreshes the usage snapshot when stale. None uses the fleet ai-usage script path. |
+| keep_duplicates | bool | false | FRAMEWEAVE_KEEP_DUPLICATES | keep_duplicates | Keep near-duplicate frames; skip difference-hash suppression (issue #22). |
 
 ## Slugs and channel folders
 

@@ -102,6 +102,7 @@ class Config:
     # None → chooser module defaults (AgentUsageBar path / fleet refresh script).
     usage_snapshot: Path | None
     usage_refresh_script: Path | None
+    keep_duplicates: bool  # near-duplicate suppression off (issue #22)
 
 
 _KINDS: dict[str, str] = {
@@ -129,6 +130,7 @@ _KINDS: dict[str, str] = {
     "vision_effort": "str",
     "usage_snapshot": "opt_path",
     "usage_refresh_script": "opt_path",
+    "keep_duplicates": "bool",
 }
 
 
@@ -158,6 +160,7 @@ def _defaults() -> dict[str, object]:
         "vision_effort": "low",
         "usage_snapshot": None,
         "usage_refresh_script": None,
+        "keep_duplicates": False,
     }
 
 
@@ -275,6 +278,12 @@ def cli_flags() -> list[FlagSpec]:
         FlagSpec("--speakers", "speakers", bool, "Turn on speaker labels."),
         FlagSpec("--timeout", "timeout_s", float, "Per-call timeout in seconds."),
         FlagSpec("--glossary", "glossary", Path, "Glossary file whose contents enter the run key."),
+        FlagSpec(
+            "--keep-duplicates",
+            "keep_duplicates",
+            bool,
+            "Keep near-duplicate frames; skip difference-hash suppression.",
+        ),
     ]
 
 
