@@ -11,26 +11,35 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from frameweave.format.writer import RunMeta, write_transcript
-from frameweave.stt.audio import extract
+from frameweave.stt import local as stt_local
+from frameweave.stt.audio import Chunk, extract
+from frameweave.stt.base import SttResult
 from frameweave.stt.local import WhisperXBackend
 from frameweave.stt.speakers import (
+    _DIARIZATION_MODEL,
     SpeakersUnavailable,
+    _relabel_result,
+    _s_label,
     cli_flags,
     make_diarizer,
     preflight_checks,
     relabel,
 )
-from frameweave.types import Resolved, Segment
+from frameweave.types import Chapter, Description, Frame, Resolved, Segment, Usage
+from frameweave.types import Word as FwWord
 
 FIXTURE = Path(__file__).parent / "fixtures" / "two-speakers"
 TRUTH_PATH = FIXTURE / "truth.json"
+EXAMPLE_FWV = Path(__file__).parent / "fixtures" / "example.fwv"
 
 
 def _slow_tests_enabled() -> bool:
@@ -52,31 +61,83 @@ def _config(**overrides: object) -> SimpleNamespace:
 def _meta(**overrides: object) -> RunMeta:
     base: dict[str, Any] = {
         "range_spec": "full",
-        "transcript_source": "stt-whisperx",
+        "transcript_source": "captions-auto",
         "speakers": None,
-        "vision": "none",
-        "frame_width": 768,
+        "vision": "claude:sonnet standard, 8 per call",
+        "frame_width": 1280,
         "completion": "complete",
         "completion_reason": None,
         "warnings": [],
-        "stats": {"segments": 1, "windows": 1, "frames_primary": 0, "frames_extra": 0},
-        "generated_at": "2026-09-16T00:00:00Z",
-        "tool_version": "0.0.0",
+        "stats": {
+            "segments": 5,
+            "windows": 5,
+            "frames_primary": 5,
+            "frames_extra": 1,
+            "dropped_duplicates": 0,
+        },
+        "generated_at": "2026-09-16T18:04:11Z",
+        "tool_version": "0.1.0",
         "caption_track": None,
-        "command_line": "frameweave run example.mp4",
+        "command_line": "frameweave run https://www.youtube.com/watch?v=XXXXXXXXXXX",
     }
     base.update(overrides)
     return RunMeta(**base)
 
 
-def _resolved() -> Resolved:
-    return Resolved(
-        video_id="example",
-        title="Example",
-        channel="Local",
-        source="/tmp/example.mp4",
-        duration=60.0,
+def _example_inputs() -> tuple[
+    Resolved, list[Segment], list[Frame], list[Description], RunMeta
+]:
+    """Same inputs as the committed example.fwv golden (no speaker labels)."""
+    resolved = Resolved(
+        video_id="XXXXXXXXXXX",
+        title="Connecting a worker to a queue",
+        channel="Example Channel",
+        source="https://www.youtube.com/watch?v=XXXXXXXXXXX",
+        duration=1800.0,
+        chapters=[
+            Chapter(0.0, "Intro"),
+            Chapter(270.0, "The queue"),
+            Chapter(772.0, "Results"),
+        ],
     )
+    src = "captions-auto"
+    segments = [
+        Segment(0.0, 9.0, "today we connect a worker to a queue and watch it drain", src),
+        Segment(9.0, 21.0, "first the config file so the worker knows which queue to read", src),
+        Segment(270.0, 287.0, "so I connect the worker to the jobs queue and watch it drain", src),
+        Segment(772.0, 790.0, "and that is the whole run, forty five jobs in under a minute", src),
+        Segment(790.0, 800.0, "thanks for watching", src),
+    ]
+    frames = [
+        Frame("f0001", 0.0, "primary", "frames/f0001-00-00-00.0.jpg"),
+        Frame("f0002", 9.0, "primary", "frames/f0002-00-00-09.0.jpg"),
+        Frame("f0012", 270.0, "primary", "frames/f0012-00-04-30.0.jpg"),
+        Frame("f0013", 315.0, "extra", "frames/f0013-00-05-15.0.jpg"),
+        Frame("f0031", 772.0, "primary", "frames/f0031-00-12-52.0.jpg"),
+        Frame("f0032", 790.0, "primary", "frames/f0032-00-13-10.0.jpg"),
+    ]
+    lane = "claude:sonnet"
+    descriptions = [
+        Description(
+            "f0001", lane, "A title card over a dark background.",
+            ["Connecting a worker to a queue"],
+        ),
+        Description(
+            "f0002", lane, "An editor with a short config file.", ["QUEUE_NAME=jobs", "BATCH=10"],
+        ),
+        Description(
+            "f0012",
+            lane,
+            "Terminal on the left, a config file open on the right.",
+            ["QUEUE_NAME=jobs", "worker.py", "45 pending"],
+        ),
+        Description("f0013", lane, "Same terminal, the queue counter now lower.", ["12 pending"]),
+        Description(
+            "f0031", lane, "A summary slide with three numbers.", ["45 jobs", "58 s", "0 failed"],
+        ),
+        Description("f0032", lane, "The presenter on camera, no slide."),
+    ]
+    return resolved, segments, frames, descriptions, _meta()
 
 
 def test_cli_flags_empty() -> None:
@@ -96,7 +157,7 @@ def test_preflight_checks_reports_token_and_pyannote(
     assert checks[0].ok is False
     assert "HF_TOKEN" in checks[0].remedy
     assert "huggingface.co/pyannote/segmentation-3.0" in checks[0].remedy
-    assert "huggingface.co/pyannote/speaker-diarization-3.1" in checks[0].remedy
+    assert "huggingface.co/pyannote/speaker-diarization-community-1" in checks[0].remedy
     assert "--speakers" in checks[0].remedy
     assert checks[1].remedy == "uv sync --extra speakers"
 
@@ -113,6 +174,8 @@ def test_make_diarizer_raises_without_token(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.delenv("HF_TOKEN", raising=False)
     with pytest.raises(SpeakersUnavailable, match="HF_TOKEN"):
         make_diarizer(_config(speakers=True))
+    with pytest.raises(SpeakersUnavailable, match="speaker-diarization-community-1"):
+        make_diarizer(_config(speakers=True))
 
 
 def test_relabel_maps_pyannote_labels_by_first_appearance() -> None:
@@ -127,21 +190,104 @@ def test_relabel_maps_pyannote_labels_by_first_appearance() -> None:
     assert labeled[0].text == "one"
 
 
-def test_without_speakers_writer_output_has_no_label_prefix(tmp_path: Path) -> None:
-    """Regression: speaker=None segments stay byte-identical to pre-speakers shape."""
-    segments = [
-        Segment(0.0, 1.5, "hello from the room", "stt-whisperx", speaker=None),
-        Segment(2.0, 3.0, "and another line", "stt-whisperx"),
-    ]
-    path = write_transcript(tmp_path, _resolved(), segments, [], [], _meta(speakers=None))
-    text = path.read_text(encoding="utf-8")
-    again = write_transcript(
-        tmp_path / "b", _resolved(), segments, [], [], _meta(speakers=None)
-    ).read_text(encoding="utf-8")
-    assert text == again
-    assert "S1:" not in text
-    assert "said/stt-whisperx: hello from the room" in text
-    assert "speakers:" not in text.split("\n\n", 1)[0]
+def test_s_label_helper_shared_by_relabel_paths() -> None:
+    """Both Segment and WhisperX-dict relabel paths share first-appearance numbering."""
+    mapping_a: dict[str, str] = {}
+    mapping_b: dict[str, str] = {}
+    assert _s_label("SPEAKER_01", mapping_a) == "S1"
+    assert _s_label("SPEAKER_00", mapping_a) == "S2"
+    assert _s_label("SPEAKER_01", mapping_a) == "S1"
+
+    result = _relabel_result(
+        {
+            "segments": [
+                {"speaker": "SPEAKER_01", "words": [{"speaker": "SPEAKER_01"}]},
+                {"speaker": "SPEAKER_00", "words": [{"speaker": "SPEAKER_00"}]},
+            ]
+        }
+    )
+    assert [s["speaker"] for s in result["segments"]] == ["S1", "S2"]
+    assert result["segments"][0]["words"][0]["speaker"] == "S1"
+    # Same helper drives both: empty mapping + same order yields S1 then S2.
+    assert _s_label("SPEAKER_01", mapping_b) == result["segments"][0]["speaker"]
+    assert _s_label("SPEAKER_00", mapping_b) == result["segments"][1]["speaker"]
+
+
+def test_without_speakers_writer_output_matches_example_fwv(tmp_path: Path) -> None:
+    """Regression: speaker=None transcript stays byte-identical to the committed golden."""
+    resolved, segments, frames, descriptions, meta = _example_inputs()
+    assert all(segment.speaker is None for segment in segments)
+    path = write_transcript(tmp_path, resolved, segments, frames, descriptions, meta)
+    assert path.read_text(encoding="utf-8") == EXAMPLE_FWV.read_text(encoding="utf-8")
+    assert "S1:" not in path.read_text(encoding="utf-8")
+    assert "speakers:" not in path.read_text(encoding="utf-8").split("\n\n", 1)[0]
+
+
+def test_merge_and_diarize_calls_diarizer_once_with_full_audio(tmp_path: Path) -> None:
+    """Diarization runs once after merge against the full audio path, not per chunk."""
+    calls: list[tuple[Path, list[str]]] = []
+
+    def fake_diarize(audio: Path, segments: list[Segment]) -> list[Segment]:
+        calls.append((audio, [segment.text for segment in segments]))
+        return [replace(segment, speaker="S1") for segment in segments]
+
+    backend = WhisperXBackend(diarize=fake_diarize)
+    full_audio = tmp_path / "audio.wav"
+    full_audio.write_bytes(b"RIFF")
+    first = Chunk(tmp_path / "000.wav", offset_s=0.0, duration_s=10.0)
+    second = Chunk(tmp_path / "001.wav", offset_s=8.0, duration_s=10.0)
+    first_result = SttResult(
+        segments=[Segment(8.8, 9.4, "from first", "stt-whisperx")],
+        source="stt-whisperx",
+        usage=Usage(calls=1, seconds=0.1),
+        audio_seconds=10.0,
+    )
+    second_result = SttResult(
+        segments=[
+            Segment(0.5, 1.0, "duplicate", "stt-whisperx"),
+            Segment(1.5, 2.2, "from second", "stt-whisperx"),
+        ],
+        source="stt-whisperx",
+        usage=Usage(calls=1, seconds=0.1),
+        audio_seconds=10.0,
+    )
+
+    labeled = backend.merge_and_diarize(
+        full_audio, [(second, second_result), (first, first_result)]
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0] == full_audio
+    assert calls[0][1] == ["from first", "from second"]
+    assert [segment.speaker for segment in labeled] == ["S1", "S1"]
+    assert [segment.text for segment in labeled] == ["from first", "from second"]
+
+
+def test_diarize_passes_community_1_model_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+    captured: dict[str, Any] = {}
+
+    class FakePipeline:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        def __call__(self, _source: Any) -> MagicMock:
+            return MagicMock()
+
+    def fake_assign(_diarize_segments: Any, result: dict[str, Any]) -> dict[str, Any]:
+        return result
+
+    with (
+        patch("whisperx.diarize.DiarizationPipeline", FakePipeline),
+        patch("whisperx.diarize.assign_word_speakers", fake_assign),
+    ):
+        diarizer = make_diarizer(_config(speakers=True))
+        assert diarizer is not None
+        segments = [Segment(0.0, 1.0, "hi", "stt-whisperx", words=[FwWord(0.0, 1.0, "hi", 0.9)])]
+        diarizer(Path("/tmp/audio.wav"), segments)
+
+    assert captured["model_name"] == _DIARIZATION_MODEL
+    assert captured["model_name"] == "pyannote/speaker-diarization-community-1"
 
 
 def _turn_starts(segments: list[Segment]) -> list[tuple[float, str]]:
@@ -157,17 +303,13 @@ def _turn_starts(segments: list[Segment]) -> list[tuple[float, str]]:
 
 
 def _pyannote_weights_present() -> tuple[bool, str]:
-    hub = Path.home() / ".cache" / "huggingface" / "hub"
+    hub = stt_local._hub_cache()
     if not hub.is_dir():
         return False, f"Hugging Face cache not found at {hub}"
-    names = [
-        "models--pyannote--speaker-diarization-community-1",
-        "models--pyannote--speaker-diarization-3.1",
-    ]
-    for name in names:
-        if (hub / name).is_dir():
-            return True, name
-    return False, f"none of {names} under {hub}"
+    name = f"models--{_DIARIZATION_MODEL.replace('/', '--')}"
+    if (hub / name).is_dir():
+        return True, name
+    return False, f"{name} not found under {hub}"
 
 
 @pytest.mark.slow
@@ -217,15 +359,28 @@ def test_two_speaker_fixture_turn_boundaries(
 
     config = _config(speakers=True, timeout_s=600.0)
     backend = WhisperXBackend(diarize=make_diarizer(config))
-    result = backend.transcribe(audio, config)
+    chunk_result = backend.transcribe(audio, config)
+    chunk = Chunk(audio, offset_s=0.0, duration_s=chunk_result.audio_seconds)
+    segments = backend.merge_and_diarize(audio, [(chunk, chunk_result)])
 
-    labels = {segment.speaker for segment in result.segments if segment.speaker}
+    labels = {segment.speaker for segment in segments if segment.speaker}
     assert labels == {"S1", "S2"}, f"expected two labels, got {labels!r}"
 
-    predicted = _turn_starts(result.segments)
+    predicted = _turn_starts(segments)
     assert predicted, "expected at least one labeled turn"
-    for turn in truth["turns"]:
-        start = float(turn["start_s"])
-        assert any(abs(pred_start - start) <= 1.0 for pred_start, _ in predicted), (
-            f"no predicted turn start within 1s of truth {start}; predicted={predicted}"
+    truth_turns = [
+        (float(turn["start_s"]), str(turn["speaker"])) for turn in truth["turns"]
+    ]
+    for start, speaker in truth_turns:
+        assert any(
+            abs(pred_start - start) <= 1.0 and pred_speaker == speaker
+            for pred_start, pred_speaker in predicted
+        ), f"no predicted turn within 1s of truth {(start, speaker)}; predicted={predicted}"
+    for pred_start, pred_speaker in predicted:
+        assert any(
+            abs(pred_start - start) <= 1.0 and pred_speaker == speaker
+            for start, speaker in truth_turns
+        ), (
+            f"predicted {(pred_start, pred_speaker)} has no truth match within 1s; "
+            f"truth={truth_turns}"
         )
