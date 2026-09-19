@@ -24,4 +24,3 @@ tests/fixtures/private/
 .DS_Store
 # local-only evidence, never in git
 docs/local/
-docs/audit/sessions/
