@@ -122,19 +122,25 @@ def test_precedence_frames_per_call(tmp_path: Path) -> None:
     toml_path.write_text("frames_per_call = 4\n")
     assert load_cfg().frames_per_call == 8
     assert load_cfg(toml_path=toml_path).frames_per_call == 4
-    assert load_cfg(
-        env={"FRAMEWEAVE_FRAMES_PER_CALL": "3"}, toml_path=toml_path
-    ).frames_per_call == 3
-    assert load_cfg(
-        flags={"frames_per_call": 2},
-        env={"FRAMEWEAVE_FRAMES_PER_CALL": "3"},
-        toml_path=toml_path,
-    ).frames_per_call == 2
-    assert load_cfg(
-        flags={"frames_per_call": None},
-        env={"FRAMEWEAVE_FRAMES_PER_CALL": "3"},
-        toml_path=toml_path,
-    ).frames_per_call == 3
+    assert (
+        load_cfg(env={"FRAMEWEAVE_FRAMES_PER_CALL": "3"}, toml_path=toml_path).frames_per_call == 3
+    )
+    assert (
+        load_cfg(
+            flags={"frames_per_call": 2},
+            env={"FRAMEWEAVE_FRAMES_PER_CALL": "3"},
+            toml_path=toml_path,
+        ).frames_per_call
+        == 2
+    )
+    assert (
+        load_cfg(
+            flags={"frames_per_call": None},
+            env={"FRAMEWEAVE_FRAMES_PER_CALL": "3"},
+            toml_path=toml_path,
+        ).frames_per_call
+        == 3
+    )
 
 
 def test_precedence_path(tmp_path: Path, fake_home: Path) -> None:
@@ -146,14 +152,18 @@ def test_precedence_path(tmp_path: Path, fake_home: Path) -> None:
     default = fake_home / "Library" / "Caches" / "frameweave"
     assert load_cfg().cache_dir == default
     assert load_cfg(toml_path=toml_path).cache_dir == toml_dir
-    assert load_cfg(
-        env={"FRAMEWEAVE_CACHE_DIR": str(env_dir)}, toml_path=toml_path
-    ).cache_dir == env_dir
-    assert load_cfg(
-        flags={"cache_dir": flag_dir},
-        env={"FRAMEWEAVE_CACHE_DIR": str(env_dir)},
-        toml_path=toml_path,
-    ).cache_dir == flag_dir
+    assert (
+        load_cfg(env={"FRAMEWEAVE_CACHE_DIR": str(env_dir)}, toml_path=toml_path).cache_dir
+        == env_dir
+    )
+    assert (
+        load_cfg(
+            flags={"cache_dir": flag_dir},
+            env={"FRAMEWEAVE_CACHE_DIR": str(env_dir)},
+            toml_path=toml_path,
+        ).cache_dir
+        == flag_dir
+    )
 
 
 def test_precedence_bool(tmp_path: Path) -> None:
@@ -162,11 +172,14 @@ def test_precedence_bool(tmp_path: Path) -> None:
     assert load_cfg().speakers is False
     assert load_cfg(toml_path=toml_path).speakers is True
     assert load_cfg(env={"FRAMEWEAVE_SPEAKERS": "no"}, toml_path=toml_path).speakers is False
-    assert load_cfg(
-        flags={"speakers": True},
-        env={"FRAMEWEAVE_SPEAKERS": "no"},
-        toml_path=toml_path,
-    ).speakers is True
+    assert (
+        load_cfg(
+            flags={"speakers": True},
+            env={"FRAMEWEAVE_SPEAKERS": "no"},
+            toml_path=toml_path,
+        ).speakers
+        is True
+    )
 
 
 def test_precedence_float(tmp_path: Path) -> None:
@@ -174,14 +187,18 @@ def test_precedence_float(tmp_path: Path) -> None:
     toml_path.write_text("frame_interval_s = 10\n")
     assert load_cfg().frame_interval_s == 45.0
     assert load_cfg(toml_path=toml_path).frame_interval_s == 10.0
-    assert load_cfg(
-        env={"FRAMEWEAVE_FRAME_INTERVAL_S": "20"}, toml_path=toml_path
-    ).frame_interval_s == 20.0
-    assert load_cfg(
-        flags={"frame_interval_s": 30.0},
-        env={"FRAMEWEAVE_FRAME_INTERVAL_S": "20"},
-        toml_path=toml_path,
-    ).frame_interval_s == 30.0
+    assert (
+        load_cfg(env={"FRAMEWEAVE_FRAME_INTERVAL_S": "20"}, toml_path=toml_path).frame_interval_s
+        == 20.0
+    )
+    assert (
+        load_cfg(
+            flags={"frame_interval_s": 30.0},
+            env={"FRAMEWEAVE_FRAME_INTERVAL_S": "20"},
+            toml_path=toml_path,
+        ).frame_interval_s
+        == 30.0
+    )
 
 
 def test_precedence_dict(tmp_path: Path) -> None:
@@ -193,9 +210,7 @@ def test_precedence_dict(tmp_path: Path) -> None:
     toml_cfg = load_cfg(toml_path=toml_path)
     assert toml_cfg.vision_model["gemini"] == "toml-model"
     assert toml_cfg.vision_model["codex"] == "gpt-5.6-sol"
-    env_cfg = load_cfg(
-        env={"FRAMEWEAVE_VISION_MODEL_GEMINI": "env-model"}, toml_path=toml_path
-    )
+    env_cfg = load_cfg(env={"FRAMEWEAVE_VISION_MODEL_GEMINI": "env-model"}, toml_path=toml_path)
     assert env_cfg.vision_model["gemini"] == "env-model"
     flag_cfg = load_cfg(
         flags={"vision_model": {"gemini": "flag-model"}},
@@ -212,9 +227,12 @@ def test_dotenv_earlier_wins_and_env_beats_dotenv(tmp_path: Path) -> None:
     first.write_text("FRAMEWEAVE_FRAMES_PER_CALL=11\n")
     second.write_text("FRAMEWEAVE_FRAMES_PER_CALL=22\n")
     assert load_cfg(dotenv_paths=[first, second]).frames_per_call == 11
-    assert load_cfg(
-        env={"FRAMEWEAVE_FRAMES_PER_CALL": "33"}, dotenv_paths=[first, second]
-    ).frames_per_call == 33
+    assert (
+        load_cfg(
+            env={"FRAMEWEAVE_FRAMES_PER_CALL": "33"}, dotenv_paths=[first, second]
+        ).frames_per_call
+        == 33
+    )
 
 
 def test_dotenv_does_not_mutate_os_environ(tmp_path: Path) -> None:
@@ -239,9 +257,7 @@ def test_bool_strings_case_insensitive() -> None:
 
 
 def test_time_fields_accept_timecode() -> None:
-    cfg = load_cfg(
-        env={"FRAMEWEAVE_TIMEOUT_S": "2:00", "FRAMEWEAVE_FRAME_INTERVAL_S": "1:30"}
-    )
+    cfg = load_cfg(env={"FRAMEWEAVE_TIMEOUT_S": "2:00", "FRAMEWEAVE_FRAME_INTERVAL_S": "1:30"})
     assert cfg.timeout_s == 120.0
     assert cfg.frame_interval_s == 90.0
 
@@ -455,3 +471,27 @@ def test_captions_mode_and_vision_effort_are_fields(tmp_path: Path) -> None:
     assert cfg.vision_effort == "medium"
     base = load(flags={}, env={}, toml_path=tmp_path / "none.toml", dotenv_paths=[])
     assert (base.captions_mode, base.vision_effort) == ("auto", "low")
+
+
+def test_provider_keys_from_dotenv_are_exported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Provider keys in .env reach os.environ; the process wins; nothing else leaks."""
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "from-process")
+    monkeypatch.delenv("OTHER_SECRET", raising=False)
+    path = tmp_path / ".env"
+    path.write_text("HF_TOKEN=from-file\nGEMINI_API_KEY=from-file\nOTHER_SECRET=x\n")
+    load(env=None, toml_path=MISSING_TOML, dotenv_paths=[path])
+    assert os.environ["HF_TOKEN"] == "from-file"
+    assert os.environ["GEMINI_API_KEY"] == "from-process"
+    assert "OTHER_SECRET" not in os.environ
+    monkeypatch.delenv("HF_TOKEN")
+
+
+def test_injected_env_never_exports(tmp_path: Path) -> None:
+    path = tmp_path / ".env"
+    path.write_text("HF_TOKEN=from-file\n")
+    snapshot = os.environ.copy()
+    load_cfg(dotenv_paths=[path])
+    assert os.environ == snapshot

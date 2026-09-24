@@ -182,7 +182,10 @@ def load(
     process_env: Mapping[str, str] = os.environ if env is None else env
     values = _defaults()
     _apply_toml(values, toml_path)
-    _apply_env(values, _env_layer(process_env, dotenv_paths))
+    layer = _env_layer(process_env, dotenv_paths)
+    _apply_env(values, layer)
+    if env is None:
+        _export_provider_keys(layer, process_env)
     _apply_flags(values, flags or {})
     return Config(**values)  # type: ignore[arg-type]
 
@@ -317,6 +320,20 @@ def _cap_slug(slug: str) -> str:
     return window.strip("-")
 
 
+# Provider credentials read by the vision and speaker backends straight from
+# os.environ. A `.env` value for one of these is exported into the process when
+# the process has no value of its own, so the keys can live in `.env` alongside
+# FRAMEWEAVE_OUT (decision 54). Every other non-FRAMEWEAVE_* key stays put.
+PROVIDER_KEYS: tuple[str, ...] = ("GEMINI_API_KEY", "HF_TOKEN")
+
+
+def _export_provider_keys(layer: Mapping[str, str], process_env: Mapping[str, str]) -> None:
+    for key in PROVIDER_KEYS:
+        if key in process_env or key not in layer:
+            continue
+        os.environ[key] = layer[key]
+
+
 def _env_layer(
     process_env: Mapping[str, str],
     dotenv_paths: Sequence[Path],
@@ -397,9 +414,7 @@ def _apply_flags(values: dict[str, object], flags: Mapping[str, object]) -> None
         values[key] = _coerce(_KINDS[key], raw, key, "flag")
 
 
-def _merge_str_dict(
-    current: object, incoming: object, key: str, source: str
-) -> dict[str, str]:
+def _merge_str_dict(current: object, incoming: object, key: str, source: str) -> dict[str, str]:
     if not isinstance(incoming, dict):
         raise ConfigError(f"unparseable value for {key} from {source}: {incoming!r}")
     merged = dict(current) if isinstance(current, dict) else {}

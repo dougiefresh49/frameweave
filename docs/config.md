@@ -12,7 +12,7 @@ Highest first: CLI flag values (a dict; `None` means not given), `FRAMEWEAVE_<FI
 
 Time-valued strings (`timeout_s`, `frame_interval_s`) parse through `util.timecode`; native numbers must be finite and non-negative. Bools from strings: `1`/`0`/`true`/`false`/`yes`/`no`, case-insensitive. Paths are strings or `os.PathLike` (not numbers) and expand `~`. An empty `FRAMEWEAVE_*` value still counts as given: optional fields become `None`, required fields raise. `vision_model` comes from a `[vision_model]` table or `FRAMEWEAVE_VISION_MODEL_CODEX` and friends. An unknown toml key or an unparseable value raises `ConfigError` naming the key and the source (`env`, `toml`, `flag`).
 
-`.env.example` also lists `FRAMEWEAVE_SCRUB_TERMS` and `FRAMEWEAVE_KICKOFF_DIR`. Those are not `Config` fields.
+`.env.example` also lists `FRAMEWEAVE_SCRUB_TERMS` and `FRAMEWEAVE_KICKOFF_DIR`. Those are not `Config` fields. `GEMINI_API_KEY` and `HF_TOKEN` are not `Config` fields either, but a value in `.env` is exported into the process when the shell has none (decision 54); the vision and speaker backends read them from the environment.
 
 ## Fields
 
