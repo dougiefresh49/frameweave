@@ -11,7 +11,7 @@ One line: M1 is shipped and accepted; the tool analyzes a YouTube video, a chapt
 | M2 cheaper and sturdier | 22, 23, 58, 70 settled; 19 and 20 blocked on keys that do not exist here | partly done |
 | M3 optional depth | 24, 25 | not started, gated on need |
 
-Main: 442 tests, 36 merged PRs, CI on ubuntu and macOS with ffmpeg installed, scrub gate on every push. Repo `dougiefresh49/frameweave`, public; local checkout `~/projects/analyze-video` (decision 50).
+Main: 442 tests, 36 merged PRs in the first build (their numbers below refer to the first repo, decision 53), CI on ubuntu and macOS with ffmpeg installed, scrub gate on every push. Repo `dougiefresh49/frameweave`, public; local checkout `~/projects/analyze-video` (decision 50).
 
 ## Measured on real runs (decisions 47 to 51)
 
@@ -21,10 +21,10 @@ Main: 442 tests, 36 merged PRs, CI on ubuntu and macOS with ffmpeg installed, sc
 
 ## What the acceptance run found (and what happened)
 
-1. The chooser picked the metered lane while the Gemini key was absent and the run failed only at the describe stage: fixed in #66 (a lane without its key or CLI is not a candidate; the run fails before any download).
-2. SIGINT did not stop a run mid-describe: fixed in #68.
-3. `lane_choice` lost on cache hits, the frames-only completion string clobbered, the `speakers:` header never set: fixed in #71.
-4. Speech-to-text segments were whisper-sized, so a 4-minute recording produced 59 frames: fixed in #54 (20 to 40 s presentation segments).
+1. The chooser picked the metered lane while the Gemini key was absent and the run failed only at the describe stage: fixed in #35 (a lane without its key or CLI is not a candidate; the run fails before any download).
+2. SIGINT did not stop a run mid-describe: fixed in #36.
+3. `lane_choice` lost on cache hits, the frames-only completion string clobbered, the `speakers:` header never set: fixed in #38.
+4. Speech-to-text segments were whisper-sized, so a 4-minute recording produced 59 frames: fixed in #31 (20 to 40 s presentation segments).
 
 ## Needs your eyes
 
