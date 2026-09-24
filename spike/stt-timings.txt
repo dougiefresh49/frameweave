@@ -1,0 +1,2 @@
+whisperx cpu int8: 178s rc=0
+mlx-whisper large-v3-turbo: 64s rc=0
