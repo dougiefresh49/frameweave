@@ -159,6 +159,13 @@ def preflight_checks(config: Config) -> list[Check]:
     return [Check("ffmpeg", ok, first, _FFMPEG_REMEDY)]
 
 
+def upper_bound(duration_s: float, config: Config) -> int:
+    """Most frames a run over ``duration_s`` can extract: the budget (decision 56)."""
+    if duration_s <= 0:
+        return 0
+    return max(0, _budget(duration_s, config))
+
+
 def _budget(duration_s: float, config: Config) -> int:
     if config.max_frames is not None:
         return int(config.max_frames)

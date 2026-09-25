@@ -19,7 +19,7 @@ from typing import Any, TextIO
 
 from frameweave.config import Config, ConfigError, FlagSpec, load, require_out
 from frameweave.config import run_key as make_run_key
-from frameweave.frames import plan as plan_frames
+from frameweave.frames import upper_bound as frame_upper_bound
 from frameweave.preflight import (
     MODULES,
     _dir_size,
@@ -34,7 +34,7 @@ from frameweave.sources.http import HttpSource
 from frameweave.sources.local import LocalFileSource
 from frameweave.sources.youtube import SourceBusy, YouTubeSource
 from frameweave.stt import SttError
-from frameweave.types import Resolved, Segment, Source
+from frameweave.types import Resolved, Source
 from frameweave.util import timecode
 from frameweave.util.media import NotMediaError
 from frameweave.util.retry import RequestTimeout
@@ -500,16 +500,11 @@ def _print_estimate(
     published = resolved.published or "unknown"
     chapters = len(resolved.chapters)
 
-    # Upper bound: one synthetic segment spanning the duration (interval-only plan).
-    # A range prints its full frame budget instead: a short window's interval plan
-    # is a few frames, but every transcript segment start can add one up to the budget.
     window = float(resolved.duration)
     ranged = range_spec is not None and range_spec.source != "full"
     if ranged and range_spec.end > range_spec.start:
         window = range_spec.end - range_spec.start
-    synthetic = [Segment(0.0, window, "", "none")]
-    planned = plan_frames(synthetic, window, config)
-    frames = planned.budget if ranged and window > 0 else len(planned.frames)
+    frames = frame_upper_bound(window, config)
     per_call = max(1, int(config.frames_per_call))
     plan = Plan(
         frames=frames,
