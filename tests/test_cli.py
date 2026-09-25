@@ -649,7 +649,7 @@ def _estimate_lines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *argv: str)
 @pytest.mark.parametrize(
     ("argv", "range_line", "frames", "tokens"),
     [
-        ((), None, "436", "(55 calls, 436 frames)"),
+        ((), None, "654", "(82 calls, 654 frames)"),
         (("--start", "03:16:40", "--end", "03:17:58"), "03:16:40-03:17:58 (00:01:18)",
          "80", "(10 calls, 80 frames)"),
         (("--chapter", "demo"), "chapter: Demo (00:01:18)", "80", "(10 calls, 80 frames)"),
@@ -665,7 +665,7 @@ def test_inspect_estimate_uses_range_length(
     frames: str,
     tokens: str,
 ) -> None:
-    """Issue #40: a range prints _budget(range length), not the whole video's plan."""
+    """Issues #40 and #42: the bound is _budget(length) for a range and the full video."""
     lines = _estimate_lines(tmp_path, monkeypatch, *argv)
     assert lines["duration"] == "05:27:00"
     assert lines.get("range") == range_line
