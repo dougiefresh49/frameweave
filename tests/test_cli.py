@@ -651,10 +651,10 @@ def _estimate_lines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *argv: str)
     [
         ((), None, "436", "(55 calls, 436 frames)"),
         (("--start", "03:16:40", "--end", "03:17:58"), "03:16:40-03:17:58 (00:01:18)",
-         "2", "(1 calls, 2 frames)"),
-        (("--chapter", "demo"), "chapter: Demo (00:01:18)", "2", "(1 calls, 2 frames)"),
-        (("--start", "01:00:00", "--end", "02:00:00"), "01:00:00-02:00:00 (01:00:00)",
          "80", "(10 calls, 80 frames)"),
+        (("--chapter", "demo"), "chapter: Demo (00:01:18)", "80", "(10 calls, 80 frames)"),
+        (("--start", "01:00:00", "--end", "02:00:00"), "01:00:00-02:00:00 (01:00:00)",
+         "120", "(15 calls, 120 frames)"),
     ],
 )
 def test_inspect_estimate_uses_range_length(
@@ -665,7 +665,7 @@ def test_inspect_estimate_uses_range_length(
     frames: str,
     tokens: str,
 ) -> None:
-    """Issue #40: the frame bound and tokens follow the range, not the whole video."""
+    """Issue #40: a range prints _budget(range length), not the whole video's plan."""
     lines = _estimate_lines(tmp_path, monkeypatch, *argv)
     assert lines["duration"] == "05:27:00"
     assert lines.get("range") == range_line
@@ -686,5 +686,5 @@ def test_run_dry_run_estimate_uses_range(
         **_load_kwargs(tmp_path),
     )
     assert code == 0, buf.getvalue()
-    assert "frames upper bound: 2\n" in buf.getvalue()
+    assert "frames upper bound: 80\n" in buf.getvalue()
     assert "range: chapter: Demo (00:01:18)\n" in buf.getvalue()

@@ -500,15 +500,16 @@ def _print_estimate(
     published = resolved.published or "unknown"
     chapters = len(resolved.chapters)
 
-    # Upper bound: one synthetic segment spanning the window (interval-only plan),
-    # the same window-relative plan the frames stage makes for a range.
+    # Upper bound: one synthetic segment spanning the duration (interval-only plan).
+    # A range prints its full frame budget instead: a short window's interval plan
+    # is a few frames, but every transcript segment start can add one up to the budget.
     window = float(resolved.duration)
     ranged = range_spec is not None and range_spec.source != "full"
     if ranged and range_spec.end > range_spec.start:
         window = range_spec.end - range_spec.start
     synthetic = [Segment(0.0, window, "", "none")]
     planned = plan_frames(synthetic, window, config)
-    frames = len(planned.frames)
+    frames = planned.budget if ranged and window > 0 else len(planned.frames)
     per_call = max(1, int(config.frames_per_call))
     plan = Plan(
         frames=frames,
