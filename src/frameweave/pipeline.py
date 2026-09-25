@@ -49,6 +49,7 @@ from frameweave.format.writer import (
 )
 from frameweave.frames import extract as extract_frames
 from frameweave.frames import plan as plan_frames
+from frameweave.frames import upper_bound as frame_upper_bound
 from frameweave.ledger import Ledger, dollars_for_stage, reconcile
 from frameweave.range import RangeSpec, overlaps
 from frameweave.range import parse as parse_range
@@ -539,9 +540,7 @@ def _with_resolved_lane(
         return config, None, None
 
     if frames is None:
-        synthetic = [Segment(0.0, resolved.duration, "", "none")]
-        planned = plan_frames(synthetic, resolved.duration, config)
-        frame_count = len(planned.frames)
+        frame_count = frame_upper_bound(resolved.duration, config)
         minutes = resolved.duration / 60.0
     else:
         frame_count = int(frames)

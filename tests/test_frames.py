@@ -402,3 +402,12 @@ def _tiny_jpeg(path: Path) -> None:
         capture_output=True,
         check=True,
     )
+
+
+def test_upper_bound_is_the_budget() -> None:
+    """Decision 56: the pre-spend bound is the budget, zero for no duration or a negative cap."""
+    assert frames_mod.upper_bound(19620.0, _cfg()) == 654
+    assert frames_mod.upper_bound(78.0, _cfg()) == 80
+    assert frames_mod.upper_bound(19620.0, _cfg(max_frames=30)) == 30
+    assert frames_mod.upper_bound(19620.0, _cfg(max_frames=-5)) == 0
+    assert frames_mod.upper_bound(0.0, _cfg()) == 0

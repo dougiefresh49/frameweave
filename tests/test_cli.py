@@ -650,6 +650,8 @@ def _estimate_lines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *argv: str)
     ("argv", "range_line", "frames", "tokens"),
     [
         ((), None, "654", "(82 calls, 654 frames)"),
+        (("--max-frames", "30"), None, "30", "(4 calls, 30 frames)"),
+        (("--max-frames=-5",), None, "0", "(0 calls, 0 frames)"),
         (("--start", "03:16:40", "--end", "03:17:58"), "03:16:40-03:17:58 (00:01:18)",
          "80", "(10 calls, 80 frames)"),
         (("--chapter", "demo"), "chapter: Demo (00:01:18)", "80", "(10 calls, 80 frames)"),
