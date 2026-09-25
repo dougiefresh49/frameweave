@@ -1274,3 +1274,32 @@ def test_auto_describe_sizes_lane_choice_by_range(
         end="00:00:08",
     )
     assert seen == [pytest.approx(6.0 / 60.0)]
+
+
+def test_early_lane_choice_sized_by_frame_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#42: the pre-stage-1 auto choice sizes by the budget, as the estimate does."""
+    import frameweave.pipeline as pipeline_mod
+
+    seen: list[int] = []
+
+    def fake_choose(plan, *args, **kwargs):
+        seen.append(plan.frames)
+        raise RuntimeError("stop after the plan")
+
+    monkeypatch.setattr(pipeline_mod, "load_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline_mod, "choose", fake_choose)
+    resolved = Resolved(
+        video_id="long-stream",
+        title="Long stream",
+        channel="Test Channel",
+        source="https://example.invalid/long",
+        duration=19620.0,
+    )
+    with pytest.raises(RuntimeError, match="stop after the plan"):
+        pipeline_mod._with_resolved_lane(
+            _cfg(tmp_path, vision_lane="auto", frame_interval_s=45.0),
+            resolved=resolved,
+        )
+    assert seen == [654]
