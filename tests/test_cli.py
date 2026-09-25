@@ -11,7 +11,7 @@ import pytest
 from frameweave.cli import _collect_flags, _flags_dict, cli_flags, main, preflight_checks
 from frameweave.config import load
 from frameweave.stt.base import SttResult
-from frameweave.types import Usage
+from frameweave.types import Chapter, Resolved, Usage
 from tests.fakes.pipeline import FakeSource, FakeStt, FakeVision
 from tests.make_synthetic import make as make_synthetic
 
@@ -603,3 +603,88 @@ def test_format_cost_prints_dollars_for_metered_or_nonzero() -> None:
     assert _format_cost(0.0, "gemini") == "cost: $0.000"
     assert _format_cost(0.0, "claude") == "cost: $0.000 (subscription)"
     assert _format_cost(0.05, "claude") == "cost: $0.050"
+
+
+class LongSource:
+    """Resolves a fake 5h27m stream with chapters; never fetches."""
+
+    name = "long"
+
+    def matches(self, raw_input: str) -> bool:
+        del raw_input
+        return True
+
+    def resolve(self, raw_input: str) -> Resolved:
+        del raw_input
+        return Resolved(
+            video_id="long-stream",
+            title="Long stream",
+            channel="Test Channel",
+            source="https://example.invalid/long",
+            duration=19620.0,
+            has_captions=False,
+            chapters=(
+                Chapter(0.0, "Intro"),
+                Chapter(11800.0, "Demo"),
+                Chapter(11878.0, "Q&A"),
+            ),
+        )
+
+
+def _estimate_lines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *argv: str) -> dict:
+    monkeypatch.setattr("frameweave.cli.load_snapshot", lambda *a, **k: None)
+    buf = io.StringIO()
+    code = main(
+        ["inspect", "https://example.invalid/long", *argv],
+        backends={"source": LongSource()},
+        stdout=buf,
+        **_load_kwargs(tmp_path),
+    )
+    assert code == 0, buf.getvalue()
+    return dict(
+        line.split(": ", 1) for line in buf.getvalue().splitlines() if ": " in line
+    )
+
+
+@pytest.mark.parametrize(
+    ("argv", "range_line", "frames", "tokens"),
+    [
+        ((), None, "436", "(55 calls, 436 frames)"),
+        (("--start", "03:16:40", "--end", "03:17:58"), "03:16:40-03:17:58 (00:01:18)",
+         "80", "(10 calls, 80 frames)"),
+        (("--chapter", "demo"), "chapter: Demo (00:01:18)", "80", "(10 calls, 80 frames)"),
+        (("--start", "01:00:00", "--end", "02:00:00"), "01:00:00-02:00:00 (01:00:00)",
+         "120", "(15 calls, 120 frames)"),
+    ],
+)
+def test_inspect_estimate_uses_range_length(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: tuple[str, ...],
+    range_line: str | None,
+    frames: str,
+    tokens: str,
+) -> None:
+    """Issue #40: a range prints _budget(range length), not the whole video's plan."""
+    lines = _estimate_lines(tmp_path, monkeypatch, *argv)
+    assert lines["duration"] == "05:27:00"
+    assert lines.get("range") == range_line
+    assert lines["frames upper bound"] == frames
+    assert lines["tokens (est)"].endswith(tokens)
+
+
+def test_run_dry_run_estimate_uses_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #40: run --dry-run prints the same range-sized estimate as inspect."""
+    monkeypatch.setattr("frameweave.cli.load_snapshot", lambda *a, **k: None)
+    buf = io.StringIO()
+    code = main(
+        ["run", "https://example.invalid/long", "--dry-run", "--chapter", "demo"],
+        backends={"source": LongSource()},
+        stdout=buf,
+        **_load_kwargs(tmp_path),
+    )
+    assert code == 0, buf.getvalue()
+    assert "frames upper bound: 80\n" in buf.getvalue()
+    assert "range: chapter: Demo (00:01:18)\n" in buf.getvalue()

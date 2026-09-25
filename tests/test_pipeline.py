@@ -1240,3 +1240,37 @@ def test_speaker_count_reaches_header_and_meta(
     assert "speakers: 2" in header
     readme = (outcome.output_path / "README.md").read_text(encoding="utf-8")
     assert "## Speakers" in readme
+
+
+def test_auto_describe_sizes_lane_choice_by_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#40 review: stage 6's auto choice uses the range's minutes, not the video's."""
+    import frameweave.pipeline as pipeline_mod
+
+    seen: list[float | None] = []
+    original = pipeline_mod._with_resolved_lane
+
+    def spy(config, **kwargs):
+        if kwargs.get("frames") is not None:
+            seen.append(kwargs.get("transcript_minutes"))
+        return original(config, **kwargs)
+
+    monkeypatch.setattr(pipeline_mod, "_with_resolved_lane", spy)
+    video = _video(tmp_path)
+    cfg = _cfg(
+        tmp_path,
+        vision_lane="auto",
+        usage_snapshot=tmp_path / "missing-snapshot.json",
+        usage_refresh_script=tmp_path / "missing-refresh.sh",
+    )
+    run(
+        str(video),
+        cfg,
+        source=FakeSource(video=video),
+        stt=FakeStt(),
+        vision=FakeVision(),
+        start="00:00:02",
+        end="00:00:08",
+    )
+    assert seen == [pytest.approx(6.0 / 60.0)]

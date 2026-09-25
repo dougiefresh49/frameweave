@@ -28,6 +28,8 @@ from frameweave.preflight import (
     exit_code,
     run_doctor,
 )
+from frameweave.range import RangeSpec, url_t_from
+from frameweave.range import parse as parse_range
 from frameweave.sources.http import HttpSource
 from frameweave.sources.local import LocalFileSource
 from frameweave.sources.youtube import SourceBusy, YouTubeSource
@@ -298,7 +300,7 @@ def _cmd_inspect(
     source = _pick_source(args.input, backends)
     resolved = source.resolve(args.input)
     _write_resolved(config, resolved)
-    _print_estimate(resolved, config, out)
+    _print_estimate(resolved, config, out, range_spec=_parse_range(args, resolved, source))
     return 0
 
 
@@ -324,29 +326,21 @@ def _cmd_run(
     resolved = source.resolve(args.input)
     _write_resolved(config, resolved)
 
+    start = getattr(args, "start", None)
+    end = getattr(args, "end", None)
+    chapter = getattr(args, "chapter", None)
+    url_t = url_t_from(args.input)
+    range_spec = _parse_range(args, resolved, source)
+    range_label = range_spec.label
+
     dry_run = bool(getattr(args, "dry_run", False))
     if dry_run:
-        _print_estimate(resolved, config, out)
+        _print_estimate(resolved, config, out, range_spec=range_spec)
         return 0
 
     quiet = bool(getattr(args, "quiet", False))
     frames_only = bool(getattr(args, "frames_only", False))
     redo = getattr(args, "redo", None) or ()
-
-    from frameweave.range import parse as parse_range
-    from frameweave.range import url_t_from
-
-    start = getattr(args, "start", None)
-    end = getattr(args, "end", None)
-    chapter = getattr(args, "chapter", None)
-    url_t = url_t_from(args.input)
-    defer = float(resolved.duration) <= 0.0 and callable(
-        getattr(source, "resolved_after_fetch", None)
-    )
-    range_spec = parse_range(
-        start, end, chapter, url_t, resolved, defer_bounds=defer
-    )
-    range_label = range_spec.label
 
     printed_estimate = False
 
@@ -354,7 +348,7 @@ def _cmd_run(
         nonlocal printed_estimate
         if msg.startswith("stage resolve:"):
             if not printed_estimate:
-                _print_estimate(resolved, config, out)
+                _print_estimate(resolved, config, out, range_spec=range_spec)
                 printed_estimate = True
             if not quiet:
                 print(msg, file=out)
@@ -385,7 +379,7 @@ def _cmd_run(
         return _handle_error(exc, bool(getattr(args, "debug", False)), err)
 
     if not printed_estimate:
-        _print_estimate(resolved, config, out)
+        _print_estimate(resolved, config, out, range_spec=range_spec)
 
     print(str(outcome.output_path.resolve()), file=out)
     print(_format_cost(outcome.cost_usd, outcome.vision_lane), file=out)
@@ -475,7 +469,28 @@ def _write_resolved(config: Config, resolved: Resolved) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _print_estimate(resolved: Resolved, config: Config, out: TextIO) -> None:
+def _parse_range(args: argparse.Namespace, resolved: Resolved, source: Source) -> RangeSpec:
+    """The run's range from --start/--end, --chapter, or the URL's t=."""
+    defer = float(resolved.duration) <= 0.0 and callable(
+        getattr(source, "resolved_after_fetch", None)
+    )
+    return parse_range(
+        getattr(args, "start", None),
+        getattr(args, "end", None),
+        getattr(args, "chapter", None),
+        url_t_from(args.input),
+        resolved,
+        defer_bounds=defer,
+    )
+
+
+def _print_estimate(
+    resolved: Resolved,
+    config: Config,
+    out: TextIO,
+    *,
+    range_spec: RangeSpec | None = None,
+) -> None:
     duration = timecode.format(resolved.duration, tenths=False)
     captions = (
         "yes"
@@ -486,13 +501,19 @@ def _print_estimate(resolved: Resolved, config: Config, out: TextIO) -> None:
     chapters = len(resolved.chapters)
 
     # Upper bound: one synthetic segment spanning the duration (interval-only plan).
-    synthetic = [Segment(0.0, resolved.duration, "", "none")]
-    planned = plan_frames(synthetic, resolved.duration, config)
-    frames = len(planned.frames)
+    # A range prints its full frame budget instead: a short window's interval plan
+    # is a few frames, but every transcript segment start can add one up to the budget.
+    window = float(resolved.duration)
+    ranged = range_spec is not None and range_spec.source != "full"
+    if ranged and range_spec.end > range_spec.start:
+        window = range_spec.end - range_spec.start
+    synthetic = [Segment(0.0, window, "", "none")]
+    planned = plan_frames(synthetic, window, config)
+    frames = planned.budget if ranged and window > 0 else len(planned.frames)
     per_call = max(1, int(config.frames_per_call))
     plan = Plan(
         frames=frames,
-        transcript_minutes=resolved.duration / 60.0,
+        transcript_minutes=window / 60.0,
         frames_per_call=per_call,
     )
     snap_path, refresh_script = resolve_usage_paths(config)
@@ -515,6 +536,9 @@ def _print_estimate(resolved: Resolved, config: Config, out: TextIO) -> None:
     print(f"published: {published}", file=out)
     print(f"captions: {captions}", file=out)
     print(f"chapters: {chapters}", file=out)
+    if ranged:
+        length = timecode.format(window, tenths=False)
+        print(f"range: {range_spec.header} ({length})", file=out)
     print(f"frames upper bound: {frames}", file=out)
     print(f"vision lane: {lane}", file=out)
     chosen_proj = next((p for p in choice.projections if p.lane == lane), None)

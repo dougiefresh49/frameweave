@@ -877,7 +877,9 @@ def _stage_describe(ctx: RunContext) -> StageResult:
     # when a refresh was needed (stale before-only load would miss the windows).
     before_snap = None
     if ctx.requested_vision_lane == "auto":
-        minutes = ctx.resolved.duration / 60.0
+        # Size the choice by the range, as the pre-spend estimate does (#40).
+        window = ctx.range_spec.end - ctx.range_spec.start
+        minutes = (window if window > 0 else ctx.resolved.duration) / 60.0
         config, choice_dict, before_snap = _with_resolved_lane(
             replace(ctx.config, vision_lane="auto"),
             resolved=ctx.resolved,
