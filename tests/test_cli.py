@@ -839,3 +839,29 @@ def test_run_dry_run_estimate_uses_range(
     assert code == 0, buf.getvalue()
     assert "frames upper bound: 80\n" in buf.getvalue()
     assert "range: chapter: Demo (00:01:18)\n" in buf.getvalue()
+
+
+@pytest.mark.parametrize("command", ["inspect", "run"])
+def test_timeout_flag_reaches_the_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """Issue #46: --timeout never reached the sources _pick_source built."""
+    seen: list[float] = []
+
+    class Spy(FixedResolve):
+        def __init__(self, *, timeout_s: float = 120.0) -> None:
+            seen.append(timeout_s)
+            super().__init__()
+
+        def resolve(self, raw_input: str) -> Resolved:
+            raise RuntimeError("stop after source pick")
+
+    monkeypatch.setattr("frameweave.cli.YouTubeSource", Spy)
+    _quiet_snapshot(monkeypatch)
+    main(
+        [command, "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "--timeout", "900"],
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        **_load_kwargs(tmp_path),
+    )
+    assert seen == [900.0]
