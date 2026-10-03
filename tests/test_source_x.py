@@ -15,13 +15,14 @@ from frameweave.pipeline import _pick_source as pipeline_pick_source
 from frameweave.pipeline import _stage_fetch_captions
 from frameweave.sources.http import HttpSource
 from frameweave.sources.x import XSource
-from frameweave.sources.youtube import FORMAT_LADDER, YouTubeSource, YtDlpError
+from frameweave.sources.youtube import FORMAT_LADDER, YouTubeSource, YtDlpError, classify
 from frameweave.types import Resolved, Usage
+from frameweave.util.retry import Outcome, RetryExhausted
 from tests.fakes.ytdlp import FakeYtDlp
 
 RECORDED = Path(__file__).parent / "recorded" / "x" / "resolve-2102050467505430555.json"
 STATUS_ID = "2102050467505430555"
-CANONICAL = f"https://x.com/poteto/status/{STATUS_ID}"
+CANONICAL = f"https://x.com/poteto/status/{STATUS_ID}/video/1"
 
 
 @pytest.mark.parametrize(
@@ -40,6 +41,15 @@ CANONICAL = f"https://x.com/poteto/status/{STATUS_ID}"
         f"https://mobile.twitter.com/poteto/status/{STATUS_ID}/video/1",
         f"https://x.com/poteto/status/{STATUS_ID}/video/1?s=20&t=3",
         f"https://x.com/poteto/status/{STATUS_ID}?s=20",
+        f"https://x.com/i/web/status/{STATUS_ID}",
+        f"https://x.com/i/web/status/{STATUS_ID}/",
+        f"https://twitter.com/i/web/status/{STATUS_ID}/video/2",
+        f"https://mobile.twitter.com/i/web/status/{STATUS_ID}/photo/1",
+        f"https://x.com/i/web/status/{STATUS_ID}?s=46&t=Vb3kQx",
+        f"https://x.com/statuses/{STATUS_ID}",
+        f"https://twitter.com/statuses/{STATUS_ID}/",
+        f"https://www.twitter.com/statuses/{STATUS_ID}/video/3",
+        f"https://x.com/i/status/{STATUS_ID}/video/1",
     ],
 )
 def test_matches_status_urls(raw: str) -> None:
@@ -61,6 +71,95 @@ def test_matches_status_urls(raw: str) -> None:
 )
 def test_matches_rejects_non_status(raw: str) -> None:
     assert XSource().matches(raw) is False
+
+
+@pytest.mark.parametrize(
+    ("raw", "canonical", "video_id"),
+    [
+        (
+            f"https://x.com/poteto/status/{STATUS_ID}",
+            f"https://x.com/poteto/status/{STATUS_ID}/video/1",
+            f"x-{STATUS_ID}",
+        ),
+        (
+            f"https://x.com/poteto/status/{STATUS_ID}/video/2?s=20",
+            f"https://x.com/poteto/status/{STATUS_ID}/video/2",
+            f"x-{STATUS_ID}-v2",
+        ),
+        (
+            f"https://twitter.com/poteto/status/{STATUS_ID}/photo/3",
+            f"https://x.com/poteto/status/{STATUS_ID}/video/1",
+            f"x-{STATUS_ID}",
+        ),
+        (
+            f"https://x.com/i/web/status/{STATUS_ID}",
+            f"https://x.com/i/status/{STATUS_ID}/video/1",
+            f"x-{STATUS_ID}",
+        ),
+        (
+            f"https://mobile.twitter.com/i/web/status/{STATUS_ID}/video/2/",
+            f"https://x.com/i/status/{STATUS_ID}/video/2",
+            f"x-{STATUS_ID}-v2",
+        ),
+        (
+            f"https://x.com/statuses/{STATUS_ID}",
+            f"https://x.com/i/status/{STATUS_ID}/video/1",
+            f"x-{STATUS_ID}",
+        ),
+        (
+            f"https://www.twitter.com/statuses/{STATUS_ID}/photo/9",
+            f"https://x.com/i/status/{STATUS_ID}/video/1",
+            f"x-{STATUS_ID}",
+        ),
+    ],
+)
+def test_canonical_source_keeps_video_index(raw: str, canonical: str, video_id: str) -> None:
+    info = {
+        "id": "other",
+        "title": "t",
+        "uploader": "u",
+        "duration": 12,
+        "description": "",
+        "upload_date": "20260102",
+    }
+    fake = FakeYtDlp(mode="resolve_only", resolve_json=info)
+    resolved = XSource(runner=fake, attempts=0).resolve(raw)
+    assert resolved.video_id == video_id
+    assert resolved.source == canonical
+    assert fake.calls[0][-1] == canonical
+
+
+_PHOTO_POST = "ERROR: [twitter] No video could be found in this tweet"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        _PHOTO_POST,
+        "ERROR: [twitter] Requested Tweet is unavailable",
+        "ERROR: [twitter] 123 is not a video",
+        "ERROR: [twitter] This tweet is unavailable",
+        "ERROR: [twitter] NSFW tweet requires authentication",
+        "ERROR: [twitter] Twitter API says: nope",
+    ],
+)
+def test_x_error_markers_are_permanent(message: str) -> None:
+    assert classify(YtDlpError(message)) == Outcome(status="fail")
+
+
+def test_photo_post_error_fails_after_one_resolve_call() -> None:
+    calls: list[list[str]] = []
+
+    def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        return subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr=_PHOTO_POST
+        )
+
+    src = XSource(runner=runner, attempts=3)
+    with pytest.raises(YtDlpError, match="No video could be found in this tweet"):
+        src.resolve(f"https://x.com/poteto/status/{STATUS_ID}/photo/1")
+    assert len(calls) == 1
 
 
 def test_resolve_from_recorded_fixture() -> None:
@@ -99,6 +198,29 @@ def _resolved(source: str) -> Resolved:
         source=source,
         duration=1.0,
     )
+
+
+def test_fetch_media_argv_is_ladder_and_canonical_video(tmp_path: Path) -> None:
+    """Exact download argv. YouTube's fetch_media would add ``--extractor-args``."""
+    calls: list[list[str]] = []
+    canonical = f"https://x.com/poteto/status/{STATUS_ID}/video/2"
+    dest = tmp_path / "dest"
+    src = XSource(runner=_failing_runner(calls), attempts=0)
+    with pytest.raises(RetryExhausted):
+        src.fetch_media(_resolved(canonical), dest)
+    assert calls == [
+        [
+            "-f",
+            FORMAT_LADDER,
+            "-o",
+            str(dest / "media.%(ext)s"),
+            "--print-json",
+            "--no-playlist",
+            "--",
+            canonical,
+        ]
+    ]
+    assert "--extractor-args" not in calls[0]
 
 
 def test_download_once_omits_extractor_args_when_client_is_none(tmp_path: Path) -> None:

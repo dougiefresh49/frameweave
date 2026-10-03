@@ -83,6 +83,12 @@ _PERMANENT_ERROR_MARKERS = (
     "who has blocked it on copyright grounds",
     "uploader has closed their youtube account",
     "account associated with this video has been terminated",
+    "no video could be found in this tweet",
+    "requested tweet is unavailable",
+    "is not a video",
+    "is unavailable",
+    "nsfw tweet requires authentication",
+    "twitter api says",
 )
 
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
@@ -640,7 +646,15 @@ class YouTubeSource:
         tmp = dest_dir / "media.json.partial"
         tmp.write_text(json.dumps(meta, indent=2) + "\n")
         tmp.replace(dest_dir / "media.json")
-        log.info("youtube fetch used player_client=%s path=%s", result.client, path)
+        if result.client is None:
+            log.info("%s fetch path=%s", self.name, path)
+        else:
+            log.info(
+                "%s fetch used player_client=%s path=%s",
+                self.name,
+                result.client,
+                path,
+            )
         return path
 
     def _ffprobe_or_raise(self, path: Path) -> float:

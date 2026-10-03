@@ -643,7 +643,7 @@ def _stage_fetch_captions(ctx: RunContext) -> StageResult:
             warnings=[result.reason] if result.reason else [],
         )
 
-    # Non-YouTube: never fail the run. Local files and direct URLs have no
+    # Non-yt-dlp sources: never fail the run. Local files and direct URLs have no
     # caption tracks by nature — record a note for meta.stats, not a warning,
     # so a recording with speech stays ``complete`` rather than
     # ``complete-with-warnings``.
