@@ -298,7 +298,7 @@ def _cmd_inspect(
     del err
     config = load(flags=_flags_dict(args), **load_kwargs)
     _warn_low_disk(config, out)
-    source = _pick_source(args.input, backends)
+    source = _pick_source(args.input, backends, config.timeout_s)
     resolved = source.resolve(args.input)
     _write_resolved(config, resolved)
     _print_estimate(resolved, config, out, range_spec=_parse_range(args, resolved, source))
@@ -323,7 +323,7 @@ def _cmd_run(
     else:
         require_out(config)
 
-    source = _pick_source(args.input, backends)
+    source = _pick_source(args.input, backends, config.timeout_s)
     resolved = source.resolve(args.input)
     _write_resolved(config, resolved)
 
@@ -446,10 +446,17 @@ def _cmd_lanes(args: argparse.Namespace, load_kwargs: dict[str, Any], out: TextI
     return 0
 
 
-def _pick_source(raw_input: str, backends: Mapping[str, Any] | None) -> Source:
+def _pick_source(
+    raw_input: str, backends: Mapping[str, Any] | None, timeout_s: float = 120.0
+) -> Source:
     if backends and backends.get("source") is not None:
         return backends["source"]  # type: ignore[return-value]
-    for candidate in (YouTubeSource(), XSource(), HttpSource(), LocalFileSource()):
+    for candidate in (
+        YouTubeSource(timeout_s=timeout_s),
+        XSource(timeout_s=timeout_s),
+        HttpSource(timeout_s=timeout_s),
+        LocalFileSource(timeout_s=timeout_s),
+    ):
         if candidate.matches(raw_input):
             return candidate
     raise ValueError(f"no source matches input: {raw_input!r}")

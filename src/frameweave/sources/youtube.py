@@ -103,6 +103,7 @@ _YOUTUBE_HOSTS = {
 }
 
 Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+DownloadRunner = Callable[[list[str], float], subprocess.CompletedProcess[str]]
 
 
 class SourceBusy(Exception):
@@ -428,16 +429,25 @@ class YouTubeSource:
     ) -> None:
         self._timeout_s = timeout_s
         self._runner = runner or self._default_runner
+        # Injected runners take argv only; the default one honors the download timeout.
+        self._download_runner: DownloadRunner = (
+            (lambda args, _timeout_s: runner(args)) if runner else self._default_runner
+        )
         self._youtube_client = youtube_client
         self._attempts = attempts
 
-    def _default_runner(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+    def _download_timeout_s(self, resolved: Resolved) -> float:
+        return max(self._timeout_s, resolved.duration)
+
+    def _default_runner(
+        self, args: list[str], timeout_s: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, "-m", "yt_dlp", *args],
             capture_output=True,
             text=True,
             check=False,
-            timeout=self._timeout_s,
+            timeout=timeout_s if timeout_s is not None else self._timeout_s,
             stdin=subprocess.DEVNULL,
         )
 
@@ -565,7 +575,7 @@ class YouTubeSource:
         result = call(
             lambda: self._download_once(resolved, dest_dir, client, degraded=degraded),
             attempts=self._attempts,
-            timeout_s=self._timeout_s,
+            timeout_s=self._download_timeout_s(resolved),
             classify=classify,
         )
         if isinstance(result, _AdvanceResult):
@@ -595,7 +605,9 @@ class YouTubeSource:
             "--",
             resolved.source,
         ]
-        proc = self._runner(args)
+        # A media download may take up to the video's playback length; the
+        # per-call timeout is sized for metadata and caption requests.
+        proc = self._download_runner(args, self._download_timeout_s(resolved))
         _cleanup_partials(dest_dir)
         if proc.returncode != 0:
             err = (proc.stderr or proc.stdout or "").strip() or "yt-dlp failed"

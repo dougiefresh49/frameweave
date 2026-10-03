@@ -214,7 +214,7 @@ def run(
     stt = _prepare_stt(config, stt)
     reconcile(config.cache_dir)
 
-    picked = source or _pick_source(raw_input)
+    picked = source or _pick_source(raw_input, config.timeout_s)
     resolved = resolved if resolved is not None else picked.resolve(raw_input)
     # Resolve auto with an upper-bound plan so run_key has a concrete lane;
     # describe re-runs choose with the actual frame plan (issue #26).
@@ -581,8 +581,13 @@ def _prepare_stt(config: Config, stt: SttBackend | None) -> SttBackend | None:
     return None
 
 
-def _pick_source(raw_input: str) -> Source:
-    for candidate in (YouTubeSource(), XSource(), HttpSource(), LocalFileSource()):
+def _pick_source(raw_input: str, timeout_s: float = 120.0) -> Source:
+    for candidate in (
+        YouTubeSource(timeout_s=timeout_s),
+        XSource(timeout_s=timeout_s),
+        HttpSource(timeout_s=timeout_s),
+        LocalFileSource(timeout_s=timeout_s),
+    ):
         if candidate.matches(raw_input):
             return candidate
     raise ValueError(f"no source matches input: {raw_input!r}")

@@ -22,7 +22,7 @@ from frameweave.sources.youtube import (
     cli_flags,
     preflight_checks,
 )
-from frameweave.util.retry import Outcome, RequestFailed
+from frameweave.util.retry import Outcome, RequestFailed, RetryExhausted
 from tests.fakes.ytdlp import FakeYtDlp
 
 RECORDED = Path(__file__).parent / "recorded" / "youtube" / "resolve-dQw4w9WgXcQ.json"
@@ -371,3 +371,42 @@ def test_preflight_checks_ytdlp_importable() -> None:
     assert checks[0].ok is True
     assert checks[0].remedy == "uv sync"
     assert "yt-dlp" in checks[0].detail
+
+
+def test_media_download_timeout_scales_with_duration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #46: a 38-minute HLS download died at the 120 s per-call cap."""
+    from dataclasses import replace
+
+    timeouts: list[tuple[str, float]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        kind = "metadata" if "-J" in cmd else "download"
+        timeouts.append((kind, float(kwargs["timeout"])))  # type: ignore[arg-type]
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="ERROR: boom")
+
+    monkeypatch.setattr("frameweave.sources.youtube.subprocess.run", fake_run)
+    src = YouTubeSource(timeout_s=120.0, attempts=0)
+    long_video = replace(_resolved(), duration=2282.0)  # type: ignore[type-var]
+    short_video = replace(_resolved(), duration=30.0)  # type: ignore[type-var]
+
+    for resolved in (long_video, short_video):
+        with pytest.raises(YtDlpError):
+            src._download_once(resolved, tmp_path, "web", degraded=False)
+    with pytest.raises(RetryExhausted):
+        src._resolve_info(f"https://www.youtube.com/watch?v={VIDEO_ID}")
+
+    assert timeouts == [("download", 2282.0), ("download", 120.0), ("metadata", 120.0)]
+
+
+def test_pick_source_forwards_configured_timeout() -> None:
+    from frameweave.cli import _pick_source as cli_pick_source
+    from frameweave.pipeline import _pick_source as pipeline_pick_source
+
+    for url in (
+        f"https://www.youtube.com/watch?v={VIDEO_ID}",
+        "https://x.com/poteto/status/2102050467505430555",
+    ):
+        for picked in (pipeline_pick_source(url, 900.0), cli_pick_source(url, None, 900.0)):
+            assert picked._timeout_s == 900.0  # type: ignore[attr-defined]
