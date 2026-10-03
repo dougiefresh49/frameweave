@@ -675,6 +675,155 @@ def test_inspect_estimate_uses_range_length(
     assert lines["tokens (est)"].endswith(tokens)
 
 
+class FixedResolve:
+    """Resolves a fixed clip so URL ``t=`` parsing is what the test exercises."""
+
+    name = "fixed"
+
+    def __init__(self, duration: float = 60.0) -> None:
+        self._duration = duration
+
+    def matches(self, raw_input: str) -> bool:
+        del raw_input
+        return True
+
+    def resolve(self, raw_input: str) -> Resolved:
+        return Resolved(
+            video_id="fixed-1",
+            title="Fixed",
+            channel="c",
+            source=raw_input,
+            duration=self._duration,
+        )
+
+
+_X_T_URLS = [
+    "https://x.com/u/status/123?s=46&t=Vb3kQx",
+    "https://x.com/u/status/123?t=3",
+    "https://x.com/u/status/123?start=9",
+    "https://x.com/u/status/123#t=4",
+]
+
+
+def _quiet_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("frameweave.cli.load_snapshot", lambda *a, **k: None)
+
+
+@pytest.mark.parametrize("url", _X_T_URLS)
+def test_inspect_x_url_t_sets_no_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    _quiet_snapshot(monkeypatch)
+    buf = io.StringIO()
+    err = io.StringIO()
+    code = main(
+        ["inspect", url],
+        backends={"source": FixedResolve()},
+        stdout=buf,
+        stderr=err,
+        **_load_kwargs(tmp_path),
+    )
+    assert code == 0, err.getvalue()
+    assert "range:" not in buf.getvalue()
+    assert "invalid URL t=" not in err.getvalue()
+
+
+@pytest.mark.parametrize("url", _X_T_URLS)
+def test_run_x_url_t_sets_no_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    from frameweave.pipeline import RunOutcome
+
+    _quiet_snapshot(monkeypatch)
+    seen: dict[str, object] = {}
+
+    def fake_run(*args: object, **kwargs: object) -> RunOutcome:
+        del args
+        seen["url_t"] = kwargs.get("url_t")
+        return RunOutcome(
+            output_path=tmp_path / "bundle",
+            completion="complete",
+            cost_usd=0.0,
+            run_key="k",
+            warnings=[],
+            vision_lane="claude",
+        )
+
+    monkeypatch.setattr("frameweave.pipeline.run", fake_run)
+    buf = io.StringIO()
+    err = io.StringIO()
+    code = main(
+        ["run", url],
+        backends={"source": FixedResolve()},
+        stdout=buf,
+        stderr=err,
+        **_load_kwargs(tmp_path),
+    )
+    assert code == 0, err.getvalue()
+    assert seen["url_t"] is None
+    assert "range:" not in buf.getvalue()
+    assert "invalid URL t=" not in err.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("url", "start"),
+    [
+        ("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90", "00:01:30"),
+        ("https://cdn.example/clip.mp4?t=3", "00:00:03"),
+    ],
+)
+def test_inspect_non_x_url_t_still_sets_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, url: str, start: str
+) -> None:
+    _quiet_snapshot(monkeypatch)
+    buf = io.StringIO()
+    err = io.StringIO()
+    code = main(
+        ["inspect", url],
+        backends={"source": FixedResolve(duration=200.0)},
+        stdout=buf,
+        stderr=err,
+        **_load_kwargs(tmp_path),
+    )
+    assert code == 0, err.getvalue()
+    assert f"range: {start}-" in buf.getvalue()
+
+
+def test_run_youtube_url_t_still_passed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from frameweave.pipeline import RunOutcome
+
+    _quiet_snapshot(monkeypatch)
+    seen: dict[str, object] = {}
+
+    def fake_run(*args: object, **kwargs: object) -> RunOutcome:
+        del args
+        seen["url_t"] = kwargs.get("url_t")
+        return RunOutcome(
+            output_path=tmp_path / "bundle",
+            completion="complete",
+            cost_usd=0.0,
+            run_key="k",
+            warnings=[],
+            vision_lane="claude",
+        )
+
+    monkeypatch.setattr("frameweave.pipeline.run", fake_run)
+    buf = io.StringIO()
+    err = io.StringIO()
+    code = main(
+        ["run", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90"],
+        backends={"source": FixedResolve(duration=200.0)},
+        stdout=buf,
+        stderr=err,
+        **_load_kwargs(tmp_path),
+    )
+    assert code == 0, err.getvalue()
+    assert seen["url_t"] == 90.0
+    assert "range: 00:01:30-" in buf.getvalue()
+
+
 def test_run_dry_run_estimate_uses_range(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

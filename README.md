@@ -2,7 +2,7 @@
 
 Turn a video into one folder an agent can read: a plain-text transcript that interleaves what was said with what was on screen, the frames it cites, `meta.json`, `cost.json`, and a README with a trust table per line kind.
 
-Input: a YouTube URL (whole video, `--start/--end`, or `--chapter "title"`), a direct media URL, or a local file. Speech comes from captions when they exist and from local WhisperX when they do not, so a recording's audio never leaves the machine. Frames go to a vision model that reads on-screen text and quotes it exactly, through a subscription-backed CLI lane chosen per run from live quota, with a metered API as the fallback.
+Input: a YouTube URL (whole video, `--start/--end`, or `--chapter "title"`), an X/Twitter post, a direct media URL, or a local file. Speech comes from captions when they exist and from local WhisperX when they do not, so a recording's audio never leaves the machine. Frames go to a vision model that reads on-screen text and quotes it exactly, through a subscription-backed CLI lane chosen per run from live quota, with a metered API as the fallback.
 
 ## Status
 

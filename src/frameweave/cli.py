@@ -32,6 +32,7 @@ from frameweave.range import RangeSpec, url_t_from
 from frameweave.range import parse as parse_range
 from frameweave.sources.http import HttpSource
 from frameweave.sources.local import LocalFileSource
+from frameweave.sources.x import XSource
 from frameweave.sources.youtube import SourceBusy, YouTubeSource
 from frameweave.stt import SttError
 from frameweave.types import Resolved, Source
@@ -160,13 +161,13 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--debug", action="store_true", default=argparse.SUPPRESS)
 
     inspect = sub.add_parser("inspect", help="Resolve input and print the pre-spend estimate.")
-    inspect.add_argument("input", help="YouTube URL, media URL, or local file.")
+    inspect.add_argument("input", help="YouTube URL, X post, media URL, or local file.")
     inspect.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS)
     inspect.add_argument("--debug", action="store_true", default=argparse.SUPPRESS)
     _attach_flags(inspect, include_dry_run=False)
 
     run = sub.add_parser("run", help="Run the pipeline and write the output folder.")
-    run.add_argument("input", help="YouTube URL, media URL, or local file.")
+    run.add_argument("input", help="YouTube URL, X post, media URL, or local file.")
     run.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS)
     run.add_argument("--debug", action="store_true", default=argparse.SUPPRESS)
     _attach_flags(run, include_dry_run=True)
@@ -329,7 +330,7 @@ def _cmd_run(
     start = getattr(args, "start", None)
     end = getattr(args, "end", None)
     chapter = getattr(args, "chapter", None)
-    url_t = url_t_from(args.input)
+    url_t = _url_t_from_input(args.input)
     range_spec = _parse_range(args, resolved, source)
     range_label = range_spec.label
 
@@ -448,7 +449,7 @@ def _cmd_lanes(args: argparse.Namespace, load_kwargs: dict[str, Any], out: TextI
 def _pick_source(raw_input: str, backends: Mapping[str, Any] | None) -> Source:
     if backends and backends.get("source") is not None:
         return backends["source"]  # type: ignore[return-value]
-    for candidate in (YouTubeSource(), HttpSource(), LocalFileSource()):
+    for candidate in (YouTubeSource(), XSource(), HttpSource(), LocalFileSource()):
         if candidate.matches(raw_input):
             return candidate
     raise ValueError(f"no source matches input: {raw_input!r}")
@@ -469,6 +470,13 @@ def _write_resolved(config: Config, resolved: Resolved) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _url_t_from_input(raw_input: str) -> float | None:
+    """URL ``t=`` / ``start=`` / ``#t=`` is a YouTube start. X tracking tokens are not."""
+    if XSource().matches(raw_input):
+        return None
+    return url_t_from(raw_input)
+
+
 def _parse_range(args: argparse.Namespace, resolved: Resolved, source: Source) -> RangeSpec:
     """The run's range from --start/--end, --chapter, or the URL's t=."""
     defer = float(resolved.duration) <= 0.0 and callable(
@@ -478,7 +486,7 @@ def _parse_range(args: argparse.Namespace, resolved: Resolved, source: Source) -
         getattr(args, "start", None),
         getattr(args, "end", None),
         getattr(args, "chapter", None),
-        url_t_from(args.input),
+        _url_t_from_input(args.input),
         resolved,
         defer_bounds=defer,
     )

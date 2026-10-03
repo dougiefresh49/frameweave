@@ -55,6 +55,7 @@ from frameweave.range import RangeSpec, overlaps
 from frameweave.range import parse as parse_range
 from frameweave.sources.http import HttpSource
 from frameweave.sources.local import LocalFileSource
+from frameweave.sources.x import XSource
 from frameweave.sources.youtube import YouTubeSource, claim
 from frameweave.stt import audio as stt_audio
 from frameweave.stt.audio import Chunk
@@ -581,7 +582,7 @@ def _prepare_stt(config: Config, stt: SttBackend | None) -> SttBackend | None:
 
 
 def _pick_source(raw_input: str) -> Source:
-    for candidate in (YouTubeSource(), HttpSource(), LocalFileSource()):
+    for candidate in (YouTubeSource(), XSource(), HttpSource(), LocalFileSource()):
         if candidate.matches(raw_input):
             return candidate
     raise ValueError(f"no source matches input: {raw_input!r}")
@@ -621,7 +622,7 @@ def _stage_fetch_media(ctx: RunContext) -> StageResult:
 def _stage_fetch_captions(ctx: RunContext) -> StageResult:
     assert ctx.resolved is not None
     path = ctx.source_dir / "captions.json"
-    if getattr(ctx.source, "name", "") == "youtube":
+    if getattr(ctx.source, "name", "") in {"youtube", "x"}:
         result = fetch_captions_track(ctx.resolved.source, ctx.source_dir, ctx.config)
         if result.source == "none" or not path.is_file():
             _atomic_json(
@@ -641,7 +642,7 @@ def _stage_fetch_captions(ctx: RunContext) -> StageResult:
             warnings=[result.reason] if result.reason else [],
         )
 
-    # Non-YouTube: never fail the run. Local files and direct URLs have no
+    # Non-yt-dlp sources: never fail the run. Local files and direct URLs have no
     # caption tracks by nature — record a note for meta.stats, not a warning,
     # so a recording with speech stays ``complete`` rather than
     # ``complete-with-warnings``.
