@@ -1,0 +1,25 @@
+{
+  "_doc": "yt-dlp 2026.08.19 -J for an X post, trimmed to resolve fields; subtitle URL replaced. Recorded 2026-10-03 for issue #44.",
+  "id": "2101938030122868736",
+  "display_id": "2102050467505430555",
+  "title": "lauren - here's how i shipped 2,500 PRs last month to production  this was ori...",
+  "description": "here's how i shipped 2,500 PRs last month to production  this was originally supposed to be for Cursor Compile in London. i couldn't make it since i was livestreaming for Grok @Bot Galaxy so i'm making it available for free here on X! watch it on 2x speed, i talk slowly https://t.co/NgrGz7tmPM",
+  "uploader": "lauren",
+  "uploader_id": "poteto",
+  "timestamp": 1790002860,
+  "duration": 2281.984,
+  "upload_date": "20260921",
+  "webpage_url": "https://x.com/poteto/status/2102050467505430555",
+  "extractor": "twitter",
+  "extractor_key": "Twitter",
+  "view_count": 2981264,
+  "subtitles": {
+    "en": [
+      {
+        "ext": "vtt",
+        "url": "https://video.twimg.com/REDACTED.vtt"
+      }
+    ]
+  },
+  "automatic_captions": {}
+}

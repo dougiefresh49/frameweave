@@ -32,6 +32,7 @@ from frameweave.range import RangeSpec, url_t_from
 from frameweave.range import parse as parse_range
 from frameweave.sources.http import HttpSource
 from frameweave.sources.local import LocalFileSource
+from frameweave.sources.x import XSource
 from frameweave.sources.youtube import SourceBusy, YouTubeSource
 from frameweave.stt import SttError
 from frameweave.types import Resolved, Segment, Source
@@ -448,7 +449,7 @@ def _cmd_lanes(args: argparse.Namespace, load_kwargs: dict[str, Any], out: TextI
 def _pick_source(raw_input: str, backends: Mapping[str, Any] | None) -> Source:
     if backends and backends.get("source") is not None:
         return backends["source"]  # type: ignore[return-value]
-    for candidate in (YouTubeSource(), HttpSource(), LocalFileSource()):
+    for candidate in (YouTubeSource(), XSource(), HttpSource(), LocalFileSource()):
         if candidate.matches(raw_input):
             return candidate
     raise ValueError(f"no source matches input: {raw_input!r}")

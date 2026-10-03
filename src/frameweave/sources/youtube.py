@@ -137,7 +137,7 @@ class ClientAdvance(Exception):
 class _DownloadOk:
     path: Path
     info: dict[str, Any]
-    client: str
+    client: str | None
     degraded: bool
 
 
@@ -552,7 +552,7 @@ class YouTubeSource:
         self,
         resolved: Resolved,
         dest_dir: Path,
-        client: str,
+        client: str | None,
         *,
         degraded: bool,
     ) -> _DownloadOk:
@@ -570,18 +570,18 @@ class YouTubeSource:
         self,
         resolved: Resolved,
         dest_dir: Path,
-        client: str,
+        client: str | None,
         *,
         degraded: bool,
     ) -> _DownloadOk | _AdvanceResult:
         _cleanup_partials(dest_dir)
         fmt = FORMAT_PROGRESSIVE if degraded else FORMAT_LADDER
         outtmpl = str(dest_dir / "media.%(ext)s")
-        args = [
-            "-f",
-            fmt,
-            "--extractor-args",
-            f"youtube:player_client={client}",
+        args = ["-f", fmt]
+        # X posts have no YouTube player-client chain; omit the flag entirely.
+        if client is not None:
+            args += ["--extractor-args", f"youtube:player_client={client}"]
+        args += [
             "-o",
             outtmpl,
             "--print-json",
