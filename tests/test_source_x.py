@@ -138,7 +138,7 @@ _PHOTO_POST = "ERROR: [twitter] No video could be found in this tweet"
         _PHOTO_POST,
         "ERROR: [twitter] Requested Tweet is unavailable",
         "ERROR: [twitter] 123 is not a video",
-        "ERROR: [twitter] This tweet is unavailable",
+        "ERROR: [twitter] Video #2 is unavailable",
         "ERROR: [twitter] NSFW tweet requires authentication",
         "ERROR: [twitter] Twitter API says: nope",
     ],

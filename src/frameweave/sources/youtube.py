@@ -86,7 +86,7 @@ _PERMANENT_ERROR_MARKERS = (
     "no video could be found in this tweet",
     "requested tweet is unavailable",
     "is not a video",
-    "is unavailable",
+    "video #",
     "nsfw tweet requires authentication",
     "twitter api says",
 )
