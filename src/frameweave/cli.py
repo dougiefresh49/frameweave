@@ -404,7 +404,8 @@ def _cmd_cache(args: argparse.Namespace, load_kwargs: dict[str, Any], out: TextI
             print(
                 f"{row.video_id}: {_format_bytes(row.total_bytes)} "
                 f"(sources {_format_bytes(row.sources_bytes)}, "
-                f"runs {_format_bytes(row.runs_bytes)})",
+                f"runs {_format_bytes(row.runs_bytes)})"
+                f"{_title_suffix(row.title)}",
                 file=out,
             )
         print(
@@ -424,7 +425,8 @@ def _cmd_cache(args: argparse.Namespace, load_kwargs: dict[str, Any], out: TextI
     for target in report.targets:
         print(
             f"{verb} {target.kind}/{target.video_id} "
-            f"({_format_bytes(target.bytes)})",
+            f"({_format_bytes(target.bytes)})"
+            f"{_title_suffix(target.title)}",
             file=out,
         )
     if report.dry_run:
@@ -433,6 +435,10 @@ def _cmd_cache(args: argparse.Namespace, load_kwargs: dict[str, Any], out: TextI
     else:
         print(f"freed: {_format_bytes(report.bytes_freed)}", file=out)
     return 0
+
+
+def _title_suffix(title: str | None) -> str:
+    return f' "{title}"' if title else ""
 
 
 def _cmd_lanes(args: argparse.Namespace, load_kwargs: dict[str, Any], out: TextIO) -> int:

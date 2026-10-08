@@ -170,3 +170,34 @@ def test_mtime_drives_age_not_ctime(tmp_path: Path) -> None:
 
     report = prune(cache, timedelta(days=30), dry_run=True, now=now)
     assert any(t.video_id == "aged" and t.kind == "sources" for t in report.targets)
+
+
+def test_titles_come_from_resolved_json(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    old = datetime(2026, 1, 1, tzinfo=UTC).timestamp()
+    _touch(
+        cache / "sources" / "abc" / "resolved.json",
+        json.dumps({"title": "Jev is incredible"}).encode(),
+        mtime=old,
+    )
+    _touch(cache / "runs" / "abc" / "rk" / "frames.json", mtime=old)
+    _touch(cache / "sources" / "bad" / "resolved.json", b"{not json", mtime=old)
+    _touch(cache / "sources" / "blank" / "resolved.json", b'{"title": "  "}', mtime=old)
+    _touch(cache / "runs" / "orphan" / "rk" / "frames.json", mtime=old)
+
+    titles = {row.video_id: row.title for row in size(cache).videos}
+    assert titles == {"abc": "Jev is incredible", "bad": None, "blank": None, "orphan": None}
+
+    report = prune(
+        cache,
+        timedelta(days=30),
+        dry_run=True,
+        now=datetime(2026, 9, 16, tzinfo=UTC),
+    )
+    assert {(t.kind, t.video_id): t.title for t in report.targets} == {
+        ("runs", "abc"): "Jev is incredible",
+        ("sources", "abc"): "Jev is incredible",
+        ("sources", "bad"): None,
+        ("sources", "blank"): None,
+        ("runs", "orphan"): None,
+    }
