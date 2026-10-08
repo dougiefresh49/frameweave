@@ -30,6 +30,7 @@ class VideoSize:
     runs_bytes: int
     oldest_mtime: float | None
     newest_mtime: float | None
+    title: str | None = None
 
     @property
     def total_bytes(self) -> int:
@@ -54,6 +55,7 @@ class PruneTarget:
     video_id: str
     path: Path
     bytes: int
+    title: str | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,7 @@ def size(cache_dir: Path) -> CacheReport:
                 runs_bytes=run_bytes,
                 oldest_mtime=vid_old,
                 newest_mtime=vid_new,
+                title=_title(sources_root, video_id),
             )
         )
         total += src_bytes + run_bytes
@@ -187,6 +190,7 @@ def prune(
                 video_id=video_id,
                 path=path,
                 bytes=_dir_stats(path)[0],
+                title=_title(sources_root, video_id),
             )
         )
     for video_id in sorted(sources_to_delete):
@@ -197,6 +201,7 @@ def prune(
                 video_id=video_id,
                 path=path,
                 bytes=_dir_stats(path)[0],
+                title=_title(sources_root, video_id),
             )
         )
 
@@ -217,6 +222,18 @@ def _video_ids(sources_root: Path, runs_root: Path) -> list[str]:
             if path.is_dir():
                 ids.add(path.name)
     return sorted(ids)
+
+
+def _title(sources_root: Path, video_id: str) -> str | None:
+    """Title from ``sources/<id>/resolved.json``; None when absent or unreadable."""
+    try:
+        data = json.loads((sources_root / video_id / "resolved.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    title = data.get("title") if isinstance(data, dict) else None
+    if not isinstance(title, str) or not title.strip():
+        return None
+    return title.strip()
 
 
 def _dir_stats(path: Path) -> tuple[int, float | None, float | None]:

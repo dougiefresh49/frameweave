@@ -865,3 +865,39 @@ def test_timeout_flag_reaches_the_source(
         **_load_kwargs(tmp_path),
     )
     assert seen == [900.0]
+
+
+def test_cache_size_and_prune_print_titles(tmp_path: Path) -> None:
+    import os
+
+    kwargs = _load_kwargs(tmp_path)
+    cache = Path(kwargs["env"]["FRAMEWEAVE_CACHE_DIR"])
+    resolved = cache / "sources" / "D8PikZ1KhUo" / "resolved.json"
+    resolved.parent.mkdir(parents=True)
+    resolved.write_text(json.dumps({"title": "If you have a Claude sub, watch this"}))
+    untitled = cache / "runs" / "orphan" / "rk" / "frames.json"
+    untitled.parent.mkdir(parents=True)
+    untitled.write_text("{}")
+    for path in (resolved, untitled):
+        os.utime(path, (0, 0))
+
+    buf = io.StringIO()
+    assert main(["cache", "size"], stdout=buf, **kwargs) == 0
+    lines = buf.getvalue().splitlines()
+    assert any(
+        line.startswith("D8PikZ1KhUo:")
+        and line.endswith('"If you have a Claude sub, watch this"')
+        for line in lines
+    )
+    assert any(line.startswith("orphan:") and line.endswith(")") for line in lines)
+
+    buf = io.StringIO()
+    assert main(["cache", "prune"], stdout=buf, **kwargs) == 0
+    out = buf.getvalue()
+    assert 'would delete sources/D8PikZ1KhUo (' in out
+    assert 'B) "If you have a Claude sub, watch this"' in out
+    assert any(
+        line.startswith("would delete runs/orphan") and line.endswith(")")
+        for line in out.splitlines()
+    )
+    assert resolved.exists()
