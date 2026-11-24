@@ -6,7 +6,7 @@
      rules/model-roster.md loads in every session through ~/.claude/rules,
      and this file holds only this repo's overrides. Run the sync-corefiles
      skill to re-apply the shared sections.
-     Synced from fleet corefiles @ 8826d40, 2026-11-24 -->
+     Synced from fleet corefiles @ 4d64341, 2026-11-24 -->
 
 @AGENTS.md
 

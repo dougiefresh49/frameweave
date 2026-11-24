@@ -14,7 +14,7 @@
      citation AND a BAD/GOOD pair from a real moment; repo conventions and
      config are welcome, but label them as such. No speculative rules
      dressed as earned ones.
-     Synced from fleet corefiles @ 8826d40, 2026-11-24 -->
+     Synced from fleet corefiles @ 4d64341, 2026-11-24 -->
 
 # frameweave
 
@@ -398,8 +398,8 @@ none yet.
 ## Keep going once a run is approved
 
 Seven threads had me telling an agent not to stop and ask, five of them
-in my own words, all after CLAUDE.md's "Briefing opus-5.5" landed (fleet
-`docs/steer-audit-2026-11.md`; `docs/decisions.md` row 45).
+in my own words, all after the roster's "Briefing opus-5.5" landed (fleet
+`docs/steer-audit-2026-11.md` and fleet `docs/decisions.md` row 45).
 
 - An approved run stops to ask only at the config-mutation gate or at an
   irreversible step the task doesn't name. Stop points the task names
